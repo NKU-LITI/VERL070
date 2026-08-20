@@ -9,7 +9,7 @@ export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
 export WANDB_MODE="${WANDB_MODE:-online}"
 export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 
-PROJECT_NAME="${PROJECT_NAME:-scaf-grpo}"
+PROJECT_NAME="${PROJECT_NAME:-scaf-grpo-expert-sft}"
 EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_grpo}"
 MODEL_PATH="${MODEL_PATH:-/workplace/nankai/liting_space/LLM/Qwen2.5-Math-7B}"
 DATA_SEED="${DATA_SEED:-42}"
@@ -34,25 +34,25 @@ nnodes="${NNODES:-1}"
 n_gpus_per_node="${N_GPUS_PER_NODE:-2}"
 epoch="${EPOCH:-10}"
 lr="${LR:-1e-6}"
-wd="${WEIGHT_DECAY:-0.0}"
+wd="${WEIGHT_DECAY:-0.01}"
 warmup_steps="${WARMUP_STEPS:-5}"
-save_freq="${SAVE_FREQ:--1}"
+save_freq="${SAVE_FREQ:-10}"
 test_freq="${TEST_FREQ:-5}"
 
 # Batch / sequence sizes.
 train_batchsize="${TRAIN_BATCH_SIZE:-64}"
 val_batchsize="${VAL_BATCH_SIZE:-64}"
-ppo_mini_batchsize="${PPO_MINI_BATCH_SIZE:-16}"
-micro_batchsize_per_gpu="${MICRO_BATCH_SIZE_PER_GPU:-2}"
-max_prompt_length="${MAX_PROMPT_LENGTH:-4096}"
+ppo_mini_batchsize="${PPO_MINI_BATCH_SIZE:-32}"
+micro_batchsize_per_gpu="${MICRO_BATCH_SIZE_PER_GPU:-1}"
+max_prompt_length="${MAX_PROMPT_LENGTH:-1024}"
 max_response_length="${MAX_RESPONSE_LENGTH:-4096}"
 
 # Rollout
 n_rollout="${N_ROLLOUT:-8}"
 val_n_rollout="${VAL_N_ROLLOUT:-8}"
 train_temp="${TRAIN_TEMPERATURE:-1.0}"
-vllm_gpu_memory_util="${VLLM_GPU_MEMORY_UTIL:-0.30}"
-vllm_max_num_batched_tokens="${VLLM_MAX_NUM_BATCHED_TOKENS:-32768}"
+vllm_gpu_memory_util="${VLLM_GPU_MEMORY_UTIL:-0.35}"
+vllm_max_num_batched_tokens="${VLLM_MAX_NUM_BATCHED_TOKENS:-8192}"
 vllm_tp="${VLLM_TENSOR_MODEL_PARALLEL_SIZE:-2}"
 vllm_enforce_eager="${VLLM_ENFORCE_EAGER:-True}"
 
@@ -82,17 +82,25 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.ppo_mini_batch_size="${ppo_mini_batchsize}" \
+    actor_rollout_ref.actor.use_dynamic_bsz=True \
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${micro_batchsize_per_gpu}" \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu="${micro_batchsize_per_gpu}" \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu="${micro_batchsize_per_gpu}" \
+    actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
+    actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=8192 \
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
+    actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=8192 \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
+    actor_rollout_ref.actor.use_off_policy_loss=False \
+    actor_rollout_ref.actor.loss_remove_token_mean=True \
+    actor_rollout_ref.actor.loss_remove_clip=True \
     actor_rollout_ref.actor.entropy_coeff=0.001 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.temperature="${train_temp}" \
     actor_rollout_ref.rollout.n="${n_rollout}" \
-    actor_rollout_ref.rollout.val_kwargs.temperature=1.0 \
+    actor_rollout_ref.rollout.val_kwargs.temperature=0.6 \
     actor_rollout_ref.rollout.val_kwargs.n="${val_n_rollout}" \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
     actor_rollout_ref.rollout.gpu_memory_utilization="${vllm_gpu_memory_util}" \
@@ -112,10 +120,11 @@ python3 -m verl.trainer.main_ppo \
     trainer.n_gpus_per_node="${n_gpus_per_node}" \
     trainer.total_epochs="${epoch}" \
     trainer.save_freq="${save_freq}" \
+    trainer.max_actor_ckpt_to_keep=2 \
     trainer.test_freq="${test_freq}" \
     trainer.val_before_train=True \
-    trainer.with_hint=True \
-    trainer.with_luffy_expert=True \
+    trainer.with_hint=False \
+    trainer.with_luffy_expert=False \
     trainer.luffy_expert_every_group=False \
     trainer.luffy_expert_key=qwen_expert_trajectory \
     trainer.replace_hint_prompt=False \

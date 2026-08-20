@@ -955,8 +955,10 @@ def compute_policy_loss_vanilla(
     )
 
     negative_approx_kl = log_prob - old_log_prob
-    # Clamp negative_approx_kl for stability
-    negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
+    # LUFFY's unclipped GRPO baseline uses the raw importance ratio. Keep the
+    # stabilizing clamp for the regular PPO objective.
+    if not config.loss_remove_clip:
+        negative_approx_kl = torch.clamp(negative_approx_kl, min=-20.0, max=20.0)
     ratio = torch.exp(negative_approx_kl)
     ppo_kl = verl_F.masked_mean(-negative_approx_kl, response_mask)
 
@@ -979,15 +981,28 @@ def compute_policy_loss_vanilla(
         torch.gt(clip_pg_losses1, pg_losses3) * (advantages < 0).float(), response_mask
     )
 
-    pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
+    if config.loss_remove_clip:
+        pg_losses = pg_losses1
+    else:
+        pg_losses = torch.where(advantages < 0, clip_pg_losses2, clip_pg_losses1)
 
     # Apply rollout correction weights if provided
     if rollout_is_weights is not None:
         pg_losses = pg_losses * rollout_is_weights
 
-    pg_loss = agg_loss(
-        loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
-    )
+    if config.loss_remove_token_mean:
+        # Match LUFFY: sum token losses and normalize by the padded response
+        # length, leaving gradient-accumulation scaling to the actor.
+        pg_loss = agg_loss(
+            loss_mat=pg_losses,
+            loss_mask=response_mask,
+            loss_agg_mode="seq-mean-token-sum-norm",
+            loss_scale_factor=response_mask.shape[-1],
+        )
+    else:
+        pg_loss = agg_loss(
+            loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode, **config.global_batch_info
+        )
 
     pg_metrics = {
         "actor/pg_clipfrac": pg_clipfrac.detach().item(),

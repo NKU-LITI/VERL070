@@ -53,9 +53,10 @@ def _compute_micro_batch_loss_scale(
         if gradient_accumulation is None:
             raise ValueError("gradient_accumulation is required when dynamic batching is disabled")
         return 1 / gradient_accumulation
-    if config.use_off_policy_loss and config.loss_remove_token_mean:
+    if config.loss_remove_token_mean:
         # LUFFY's token-sum loss already sums over samples in a dynamic pack.
-        # Its expert recipe uses a per-GPU micro batch of one.
+        # Both its GRPO baseline and expert recipe divide each dynamic pack by
+        # the configured per-GPU gradient accumulation count.
         return 1 / config.ppo_mini_batch_size
     return micro_batch_size / config.ppo_mini_batch_size
 
