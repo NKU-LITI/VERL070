@@ -41,6 +41,66 @@ clip_ratio_low: 0.2
 # Upper bound for asymmetric clipping (used in dual-clip PPO)
 clip_ratio_high: 0.2
 
+# LUFFY upper clipping bound for the on-policy ratio
+clip_upper_bound: 1.0
+
+# Enable LUFFY mixed on/off-policy token loss
+use_off_policy_loss: false
+
+# LUFFY off-policy implementation; the migrated implementation supports token
+off_policy_loss_impl: token
+
+# Kept for parity with LUFFY; unused by its token loss implementation
+off_policy_cliprange: 0.2
+
+# Kept for parity with LUFFY; unused by its token loss implementation
+off_policy_normalize: false
+
+# Use behavior probabilities supplied with expert trajectories
+use_off_policy_probs: false
+
+# Kept for parity with LUFFY; clipping is controlled by min/max values
+use_off_policy_clip: false
+
+# Maximum off-policy policy-shaping ratio; -1 disables it
+off_policy_max_clip: -1
+
+# Minimum off-policy policy-shaping ratio; -1 disables it
+off_policy_min_clip: -1
+
+# LUFFY policy-shaping transform for expert tokens
+off_policy_reshape: no_reshape
+
+# Weight used by logp and p_logp off-policy transforms
+off_policy_reshape_weight: 0.1
+
+# Exponent used by the pow off-policy transform
+off_policy_reshape_pow_exp: 0.5
+
+# LUFFY importance-ratio transform for on-policy tokens
+on_policy_reshape: no_reshape
+
+# Weight used by the p_logp on-policy transform
+on_policy_reshape_weight: 0.1
+
+# Exponent used by the pow on-policy transform
+on_policy_reshape_pow_exp: 0.5
+
+# Mask tokens whose current probability exceeds this value; -1 disables it
+all_max_clip: -1
+
+# Aggregate LUFFY loss as sum(loss) / response_length
+loss_remove_token_mean: false
+
+# Disable clipping of the on-policy LUFFY objective
+loss_remove_clip: false
+
+# Add absolute PPO KL to the LUFFY objective
+use_ppo_kl_loss: false
+
+# Coefficient for the optional absolute PPO KL term
+ppo_kl_loss_coef: 0.01
+
 # Positive and negative tau for smoothing function in SAPO (https://arxiv.org/pdf/2511.20347)
 # default values used in the paper with Qwen3-30B-A3B-Base
 tau_pos: 1.0
@@ -57,7 +117,7 @@ policy_loss:
   # # Required when using verl.utils.omega_conf_to_dataclass to instantiate dataclass configs
   _target_: verl.workers.config.PolicyLossConfig
 
-  # Loss function mode: vanilla / clip-cov / kl-cov /gpg from https://arxiv.org/abs/2505.22617
+  # Loss function mode: vanilla / clip-cov / kl-cov / gpg
   loss_mode: "vanilla"
 
   # Ratio of tokens to be clipped for clip-cov loss
@@ -249,4 +309,3 @@ router_replay:
   # File path to load recorded routing decisions for replay
   # Required when mode is 'replay'
   replay_file: null
-

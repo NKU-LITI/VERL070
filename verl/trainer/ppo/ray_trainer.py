@@ -50,6 +50,13 @@ from verl.trainer.ppo.metric_utils import (
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
+from verl.trainer.ppo.scaf_grpo_utils import (
+    build_hinted_gen_batch,
+    find_failed_group_representatives,
+    inject_expert_trajectories,
+    replace_rollout_trajectories,
+    select_minimal_successful_hints,
+)
 from verl.trainer.ppo.utils import Role, WorkerType, need_critic, need_reference_policy, need_reward_model
 from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
@@ -235,7 +242,6 @@ def compute_advantage(
         # Initialize the mask for GRPO calculation
         grpo_calculation_mask = data.batch["response_mask"]
 
-        # Call compute_grpo_outcome_advantage with parameters matching its definition
         advantages, returns = core_algos.compute_grpo_outcome_advantage(
             token_level_rewards=data.batch["token_level_rewards"],
             response_mask=grpo_calculation_mask,
@@ -352,6 +358,33 @@ class RayPPOTrainer:
             self.kl_ctrl_in_reward = core_algos.get_kl_controller(self.config.algorithm.kl_ctrl)
 
         self.use_legacy_worker_impl = config.trainer.get("use_legacy_worker_impl", "auto")
+
+        self.with_hint = config.trainer.get("with_hint", False)
+        self.replace_hint_prompt = config.trainer.get("replace_hint_prompt", False)
+        self.warmup_steps = config.trainer.get("warmup_steps", 0)
+        self.replace_num = config.trainer.get("replace_num", 1)
+        self.scaf_hint_stages = config.trainer.get("scaf_hint_stages", 3)
+        self.with_luffy_expert = config.trainer.get("with_luffy_expert", False)
+        self.luffy_expert_every_group = config.trainer.get("luffy_expert_every_group", False)
+        self.luffy_expert_key = config.trainer.get("luffy_expert_key", "qwen_expert_trajectory")
+        if (self.with_hint or self.with_luffy_expert) and config.reward_model.launch_reward_fn_async:
+            raise ValueError("Hint/expert trajectory replacement requires reward_model.launch_reward_fn_async=False")
+        if (
+            self.with_hint or self.with_luffy_expert
+        ) and self.config.algorithm.adv_estimator != AdvantageEstimator.GRPO:
+            raise ValueError("Hint/expert trajectory replacement requires algorithm.adv_estimator=grpo")
+        if not 1 <= self.scaf_hint_stages <= 3:
+            raise ValueError("trainer.scaf_hint_stages must be 1, 2, or 3")
+        if self.replace_num < 1:
+            raise ValueError("trainer.replace_num must be positive")
+        if self.luffy_expert_every_group and not self.with_luffy_expert:
+            raise ValueError("trainer.luffy_expert_every_group requires trainer.with_luffy_expert=True")
+        if self.with_luffy_expert and not config.actor_rollout_ref.actor.use_off_policy_loss:
+            raise ValueError("LUFFY expert injection requires actor.use_off_policy_loss=True")
+        if self.with_luffy_expert and config.actor_rollout_ref.actor.off_policy_loss_impl != "token":
+            raise ValueError("LUFFY expert injection requires actor.off_policy_loss_impl=token")
+        if self.with_luffy_expert and self.use_legacy_worker_impl == "disable":
+            raise ValueError("LUFFY expert loss currently requires trainer.use_legacy_worker_impl=auto or enable")
 
         self._create_dataloader(train_dataset, val_dataset, collate_fn, train_sampler)
 
@@ -482,8 +515,14 @@ class RayPPOTrainer:
             sample_gts = [item.non_tensor_batch.get("reward_model", {}).get("ground_truth", None) for item in batch]
 
             reward_extra_infos_to_dump = reward_extra_infos_dict.copy()
+            for metadata_key in ("difficulty_bucket", "trajectory_source"):
+                if metadata_key in batch.non_tensor_batch:
+                    values = batch.non_tensor_batch[metadata_key]
+                    reward_extra_infos_to_dump[metadata_key] = (
+                        values.tolist() if isinstance(values, np.ndarray) else list(values)
+                    )
             if "request_id" in batch.non_tensor_batch:
-                reward_extra_infos_dict.setdefault(
+                reward_extra_infos_to_dump.setdefault(
                     "request_id",
                     batch.non_tensor_batch["request_id"].tolist(),
                 )
@@ -589,6 +628,10 @@ class RayPPOTrainer:
 
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
         reward_model_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & batch.non_tensor_batch.keys()
+        if self.with_luffy_expert and self.luffy_expert_key in batch.non_tensor_batch:
+            # Expert responses are injected after rollout generation, so keep this
+            # dataset column on the training batch that is repeated and scored.
+            reward_model_keys.add(self.luffy_expert_key)
 
         # pop those keys for generation
         batch_keys_to_pop = []
@@ -697,6 +740,12 @@ class RayPPOTrainer:
                 else:
                     reward_extra_infos_dict[key].extend(values if isinstance(values, list) else [values])
 
+            if "difficulty_bucket" in test_batch.non_tensor_batch:
+                difficulties = test_batch.non_tensor_batch["difficulty_bucket"]
+                reward_extra_infos_dict["difficulty_bucket"].extend(
+                    difficulties.tolist() if isinstance(difficulties, np.ndarray) else list(difficulties)
+                )
+
             # collect num_turns of each prompt
             if "__num_turns__" in test_batch.non_tensor_batch:
                 sample_turns.append(test_batch.non_tensor_batch["__num_turns__"])
@@ -731,7 +780,7 @@ class RayPPOTrainer:
                 for metric_name, metric_val in metric2val.items():
                     if (
                         (var_name == core_var)
-                        and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best"])
+                        and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best", "pass"])
                         and (f"@{n_max}" in metric_name)
                     ):
                         metric_sec = "val-core"
@@ -1269,6 +1318,240 @@ class RayPPOTrainer:
             critic_output = self.critic_wg.update_critic(batch)
         return critic_output
 
+    def _generate_scaf_hints(self, hinted_gen_batch: DataProto) -> DataProto:
+        """Generate a padded Scaf-GRPO hint batch on the configured rollout backend."""
+        size_divisor = (
+            self.actor_rollout_wg.world_size
+            if not self.async_rollout_mode
+            else self.config.actor_rollout_ref.rollout.agent.num_workers
+        )
+        padded_batch, pad_size = pad_dataproto_to_divisor(hinted_gen_batch, size_divisor)
+        if not self.async_rollout_mode:
+            output = self.actor_rollout_wg.generate_sequences(padded_batch)
+        else:
+            output = self.async_rollout_manager.generate_sequences(padded_batch)
+        output.meta_info.pop("timing", None)
+        output = unpad_dataproto(output, pad_size=pad_size)
+        # Some rollout backends only return generation tensors. Restore the
+        # identifiers needed to score and select the hinted trajectories.
+        for key, value in hinted_gen_batch.non_tensor_batch.items():
+            if key not in output.non_tensor_batch:
+                output.non_tensor_batch[key] = value
+        return output
+
+    def _score_scaf_hints(self, hinted_batch: DataProto) -> tuple[torch.Tensor, dict[str, Any]]:
+        if self.use_rm and "rm_scores" not in hinted_batch.batch.keys():
+            if not self.use_reward_loop:
+                rm_scores = self.rm_wg.compute_rm_score(hinted_batch)
+            else:
+                assert self.reward_loop_manager is not None, "RewardLoopManager is None"
+                rm_scores = self.reward_loop_manager.compute_rm_score(hinted_batch)
+            hinted_batch = hinted_batch.union(rm_scores)
+        return self._compute_or_extract_reward(hinted_batch, reward_fn=self.reward_fn, return_dict=False)
+
+    def _dump_scaf_hint_generations(
+        self,
+        hinted_batch: DataProto,
+        hint_rewards: torch.Tensor,
+        fully_failed_uids: set[Any],
+    ) -> None:
+        dump_dir = self.config.trainer.get("hint_data_dir", None)
+        if not dump_dir:
+            return
+
+        os.makedirs(dump_dir, exist_ok=True)
+        responses = self.tokenizer.batch_decode(hinted_batch.batch["responses"], skip_special_tokens=True)
+        sequence_rewards = hint_rewards.sum(dim=-1).detach().cpu().tolist()
+        entries = []
+        for idx, response in enumerate(responses):
+            entry = {
+                "uid": str(hinted_batch.non_tensor_batch["uid"][idx]),
+                "hint_level": int(hinted_batch.non_tensor_batch["hint_level"][idx]),
+                "raw_prompt": hinted_batch.non_tensor_batch["raw_prompt"][idx],
+                "response": response,
+                "reward": sequence_rewards[idx],
+                "step": self.global_steps,
+            }
+            if "difficulty_bucket" in hinted_batch.non_tensor_batch:
+                entry["difficulty_bucket"] = str(hinted_batch.non_tensor_batch["difficulty_bucket"][idx])
+            entries.append(entry)
+
+        paths_and_entries = [(os.path.join(dump_dir, f"all_hinted_{self.global_steps}.jsonl"), entries)]
+        failed_entries = [entry for entry in entries if entry["uid"] in {str(uid) for uid in fully_failed_uids}]
+        if failed_entries:
+            paths_and_entries.append(
+                (os.path.join(dump_dir, f"fully_failed_hinted_{self.global_steps}.jsonl"), failed_entries)
+            )
+        for path, records in paths_and_entries:
+            with open(path, "w", encoding="utf-8") as file:
+                for record in records:
+                    file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    def _apply_scaf_grpo(
+        self,
+        batch: DataProto,
+        initial_rewards: torch.Tensor,
+        initial_reward_extra_infos: dict[str, Any],
+        metrics: dict[str, Any],
+    ) -> tuple[torch.Tensor, dict[str, Any]]:
+        """Apply optional hint regeneration and LUFFY expert replacement."""
+        if self.with_luffy_expert and "luffy_expert_mask" not in batch.batch:
+            batch.batch["luffy_expert_mask"] = torch.zeros_like(batch.batch["response_mask"], dtype=torch.bool)
+        if "trajectory_source" not in batch.non_tensor_batch:
+            batch.non_tensor_batch["trajectory_source"] = np.asarray(["rollout"] * len(batch), dtype=object)
+        if not self.with_hint and not self.with_luffy_expert:
+            return initial_rewards, initial_reward_extra_infos
+
+        uids = batch.non_tensor_batch["uid"]
+        representative_indices, group_stats = find_failed_group_representatives(uids, initial_rewards)
+        failed_uids = {uids[row_idx] for row_idx in representative_indices}
+        metrics.update(
+            {
+                "batch/solve_none": group_stats.all_wrong,
+                "batch/solve_all": group_stats.all_correct,
+                "batch/solve_without_hint": group_stats.any_correct,
+                "batch/scaf_initial_failed_uid_count": group_stats.all_wrong,
+                "batch/scaf_reward_before_mean": initial_rewards.sum(-1).float().mean().item(),
+            }
+        )
+        hint_enabled = (
+            self.with_hint
+            and not self.luffy_expert_every_group
+            and self.global_steps > self.warmup_steps
+            and bool(representative_indices)
+        )
+        if not representative_indices and not self.luffy_expert_every_group:
+            metrics.update(
+                {
+                    "batch/solve_with_hint": 0,
+                    "batch/solve_rate": group_stats.any_correct / max(group_stats.total, 1),
+                    "batch/scaf_hint_rescued_uid_count": 0,
+                    "batch/scaf_hint_rescue_rate": 0.0,
+                    "batch/scaf_selected_hint_stage_1_uid_count": 0,
+                    "batch/scaf_selected_hint_stage_2_uid_count": 0,
+                    "batch/scaf_selected_hint_stage_3_uid_count": 0,
+                    "batch/scaf_reward_after_mean": metrics["batch/scaf_reward_before_mean"],
+                    "batch/scaf_reward_gain": 0.0,
+                    "batch/luffy_expert_injected_uid_count": 0,
+                    "batch/luffy_expert_reward_mean": 0.0,
+                }
+            )
+            return initial_rewards, initial_reward_extra_infos
+
+        hinted_batch = None
+        hint_rewards = None
+        selected: dict[Any, int] = {}
+        fully_failed_uids = failed_uids
+        stage_counts = {1: 0, 2: 0, 3: 0}
+        replaced_indices: list[int] = []
+        if hint_enabled:
+            failed_batch = batch.select_idxs(representative_indices)
+            hinted_gen_batch = build_hinted_gen_batch(failed_batch, stage_count=self.scaf_hint_stages)
+            hinted_gen_batch.meta_info["global_steps"] = self.global_steps
+            hinted_batch = self._generate_scaf_hints(hinted_gen_batch)
+            if "response_mask" not in hinted_batch.batch.keys():
+                hinted_batch.batch["response_mask"] = compute_response_mask(hinted_batch)
+
+            hint_rewards, _ = self._score_scaf_hints(hinted_batch)
+            selected, fully_failed_uids, stage_counts = select_minimal_successful_hints(
+                hinted_batch.non_tensor_batch["uid"], hinted_batch.non_tensor_batch["hint_level"], hint_rewards
+            )
+            replaced_indices = replace_rollout_trajectories(
+                batch,
+                hinted_batch,
+                selected,
+                replace_num=self.replace_num,
+                keep_original_prompt=self.replace_hint_prompt,
+            )
+            batch.batch["response_mask"] = compute_response_mask(batch)
+
+        batch.batch["scaf_hint_source_mask"] = torch.zeros_like(batch.batch["response_mask"])
+        if replaced_indices:
+            batch.batch["scaf_hint_source_mask"][replaced_indices] = batch.batch["response_mask"][replaced_indices]
+            batch.non_tensor_batch["trajectory_source"][replaced_indices] = "hint"
+
+        expert_indices = []
+        expert_uids: set[Any] = set()
+        if self.with_luffy_expert:
+            if self.luffy_expert_every_group:
+                expert_uids = set(uids.tolist())
+            elif self.with_hint:
+                expert_uids = fully_failed_uids if hint_enabled else set()
+            else:
+                expert_uids = failed_uids
+            expert_indices = inject_expert_trajectories(
+                batch,
+                expert_uids,
+                self.tokenizer,
+                expert_key=self.luffy_expert_key,
+            )
+        metrics["batch/luffy_expert_injected_uid_count"] = len(expert_indices)
+        metrics["batch/luffy_expert_target_uid_count"] = len(expert_uids)
+        metrics["batch/luffy_expert_every_group"] = float(self.luffy_expert_every_group)
+
+        # Cached rollout rewards no longer match replaced hint/expert trajectories.
+        any_replaced = bool(replaced_indices or expert_indices)
+        if not any_replaced:
+            final_rewards = initial_rewards
+            final_reward_extra_infos = initial_reward_extra_infos
+        elif self.use_rm:
+            if "rm_scores" in batch.batch.keys():
+                batch.batch.pop("rm_scores")
+            if not self.use_reward_loop:
+                batch = batch.union(self.rm_wg.compute_rm_score(batch))
+            else:
+                assert self.reward_loop_manager is not None, "RewardLoopManager is None"
+                batch = batch.union(self.reward_loop_manager.compute_rm_score(batch))
+            final_rewards, final_reward_extra_infos = self._compute_or_extract_reward(
+                batch, reward_fn=self.reward_fn, return_dict=False
+            )
+        else:
+            # Hinted trajectories were already scored by the agent-loop reward
+            # workers. Newly injected expert rows still need synchronous scoring.
+            final_rewards = initial_rewards.clone()
+            for row_idx in replaced_indices:
+                assert hint_rewards is not None
+                uid = batch.non_tensor_batch["uid"][row_idx]
+                hint_idx = selected[uid]
+                final_rewards[row_idx] = hint_rewards[hint_idx].to(final_rewards.device)
+            if expert_indices:
+                expert_batch = batch.select_idxs(expert_indices)
+                if "rm_scores" in expert_batch.batch:
+                    expert_batch.batch.pop("rm_scores")
+                expert_rewards, _ = compute_reward(expert_batch, self.reward_fn)
+                final_rewards[expert_indices] = expert_rewards.to(final_rewards.device)
+            batch.batch["rm_scores"] = final_rewards
+            final_reward_extra_infos = initial_reward_extra_infos.copy()
+            final_reward_extra_infos["acc"] = final_rewards.sum(dim=-1).detach().cpu().tolist()
+
+        rescued = len(selected)
+        total_solved = group_stats.any_correct + rescued
+        expert_reward_mean = final_rewards[expert_indices].sum(dim=-1).float().mean().item() if expert_indices else 0.0
+        metrics.update(
+            {
+                "batch/solve_none": len(fully_failed_uids),
+                "batch/solve_with_hint": rescued,
+                "batch/solve_rate": total_solved / max(group_stats.total, 1),
+                "batch/solve_hint_knowledge": stage_counts[1] / max(rescued, 1),
+                "batch/solve_hint_planing": stage_counts[2] / max(rescued, 1),
+                "batch/solve_hint_solution": stage_counts[3] / max(rescued, 1),
+                "batch/scaf_hint_rescued_uid_count": rescued,
+                "batch/scaf_hint_rescue_rate": rescued / max(group_stats.all_wrong, 1),
+                "batch/scaf_selected_hint_stage_1_uid_count": stage_counts[1],
+                "batch/scaf_selected_hint_stage_2_uid_count": stage_counts[2],
+                "batch/scaf_selected_hint_stage_3_uid_count": stage_counts[3],
+                "batch/scaf_reward_before_mean": initial_rewards.sum(-1).float().mean().item(),
+                "batch/scaf_reward_after_mean": final_rewards.sum(-1).float().mean().item(),
+                "batch/luffy_expert_reward_mean": expert_reward_mean,
+            }
+        )
+        metrics["batch/scaf_reward_gain"] = (
+            metrics["batch/scaf_reward_after_mean"] - metrics["batch/scaf_reward_before_mean"]
+        )
+        if hinted_batch is not None and hint_rewards is not None:
+            self._dump_scaf_hint_generations(hinted_batch, hint_rewards, fully_failed_uids)
+        return final_rewards, final_reward_extra_infos
+
     def fit(self):
         """
         The training loop of PPO.
@@ -1406,15 +1689,6 @@ class RayPPOTrainer:
 
                     if "response_mask" not in batch.batch.keys():
                         batch.batch["response_mask"] = compute_response_mask(batch)
-                    # Balance the number of valid tokens across DP ranks.
-                    # NOTE: This usually changes the order of data in the `batch`,
-                    # which won't affect the advantage calculation (since it's based on uid),
-                    # but might affect the loss calculation (due to the change of mini-batching).
-                    if self.config.trainer.balance_batch:
-                        self._balance_batch(batch, metrics=metrics)
-
-                    # compute global_valid tokens
-                    batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
                     with marked_timer("reward", timing_raw, color="yellow"):
                         # compute reward model score
@@ -1435,6 +1709,19 @@ class RayPPOTrainer:
                             reward_tensor, reward_extra_infos_dict = self._compute_or_extract_reward(
                                 batch, reward_fn=self.reward_fn, return_dict=False
                             )
+
+                    if self.with_hint or self.with_luffy_expert:
+                        with marked_timer("trajectory_replacement", timing_raw, color="magenta"):
+                            reward_tensor, reward_extra_infos_dict = self._apply_scaf_grpo(
+                                batch, reward_tensor, reward_extra_infos_dict, metrics
+                            )
+
+                    # Scaf-GRPO can replace both prompt and response lengths, so balance
+                    # only after the final trajectories have been selected.
+                    if self.config.trainer.balance_batch:
+                        self._balance_batch(batch, metrics=metrics)
+
+                    batch.meta_info["global_token_num"] = torch.sum(batch.batch["attention_mask"], dim=-1).tolist()
 
                     # Operating Mode Selection:
                     # - Bypass mode: Sets old_log_probs = rollout_log_probs (2 policies: π_rollout, π_θ)

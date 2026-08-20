@@ -41,7 +41,14 @@ def default_compute_score(
     Raises:
         NotImplementedError: If the reward function is not implemented for the given data source.
     """
-    if data_source == "openai/gsm8k":
+    # Scaf-GRPO datasets encode the reward implementation as the final
+    # component of data_source, for example "dataset-name/math-verify".
+    # [ADD] [REWARD] math-verify入口 
+    if data_source.endswith("/math-verify"):
+        from . import math_verify
+
+        res = math_verify.compute_score(solution_str, ground_truth)
+    elif data_source == "openai/gsm8k":
         from . import gsm8k
 
         res = gsm8k.compute_score(solution_str, ground_truth)

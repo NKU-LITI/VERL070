@@ -27,7 +27,7 @@ from torch.distributed.tensor import DTensor
 
 import verl.utils.torch_functional as verl_F
 from verl import DataProto
-from verl.trainer.ppo.core_algos import agg_loss, get_policy_loss_fn, kl_penalty
+from verl.trainer.ppo.core_algos import agg_loss, compute_token_on_off_policy_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
@@ -44,6 +44,16 @@ __all__ = ["DataParallelPPOActor"]
 
 logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+
+
+def _compute_micro_batch_loss_scale(config, micro_batch_size: int, gradient_accumulation: int) -> float:
+    if not config.use_dynamic_bsz:
+        return 1 / gradient_accumulation
+    if config.use_off_policy_loss and config.loss_remove_token_mean:
+        # LUFFY's token-sum loss already sums over samples in a dynamic pack.
+        # Its expert recipe uses a per-GPU micro batch of one.
+        return 1 / config.ppo_mini_batch_size
+    return micro_batch_size / config.ppo_mini_batch_size
 
 
 class DataParallelPPOActor(BasePPOActor):
@@ -90,6 +100,53 @@ class DataParallelPPOActor(BasePPOActor):
             self.scaler = ShardedGradScaler(growth_interval=400)
         else:
             self.scaler = None
+
+    def _compute_scaf_source_grad_norms(
+        self,
+        old_log_prob: torch.Tensor,
+        log_prob: torch.Tensor,
+        advantages: torch.Tensor,
+        response_mask: torch.Tensor,
+        hint_source_mask: torch.Tensor,
+        loss_scale_factor: float,
+        rollout_is_weights: torch.Tensor | None = None,
+    ) -> dict[str, float]:
+        """Report rollout/hint policy-signal norms without changing the optimized loss."""
+        negative_approx_kl = torch.clamp(log_prob - old_log_prob, min=-20.0, max=20.0)
+        ratio = torch.exp(negative_approx_kl)
+        clip_ratio = self.config.clip_ratio
+        clip_ratio_low = self.config.clip_ratio_low if self.config.clip_ratio_low is not None else clip_ratio
+        clip_ratio_high = self.config.clip_ratio_high if self.config.clip_ratio_high is not None else clip_ratio
+        clip_ratio_c = self.config.get("clip_ratio_c", 3.0)
+
+        pg_losses1 = -advantages * ratio
+        pg_losses2 = -advantages * torch.clamp(ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
+        clipped_losses = torch.maximum(pg_losses1, pg_losses2)
+        pg_losses = torch.where(
+            advantages < 0,
+            torch.minimum(-advantages * clip_ratio_c, clipped_losses),
+            clipped_losses,
+        )
+        if rollout_is_weights is not None:
+            pg_losses = pg_losses * rollout_is_weights
+
+        response_mask = response_mask.bool()
+        hint_mask = hint_source_mask.bool() & response_mask
+        source_masks = {"rollout": response_mask & ~hint_mask, "hint": hint_mask}
+        metrics = {}
+        for source, source_mask in source_masks.items():
+            source_loss = agg_loss(
+                loss_mat=pg_losses * source_mask.to(pg_losses.dtype),
+                loss_mask=response_mask,
+                loss_agg_mode=self.config.loss_agg_mode,
+                **self.config.global_batch_info,
+            )
+            grad = torch.autograd.grad(source_loss * loss_scale_factor, log_prob, retain_graph=True)[0]
+            grad_sq_sum = grad.detach().float().square().sum()
+            if torch.distributed.is_available() and torch.distributed.is_initialized():
+                torch.distributed.all_reduce(grad_sq_sum, op=torch.distributed.ReduceOp.SUM)
+            metrics[f"actor/source_grad_norm/{source}"] = torch.sqrt(grad_sq_sum).item()
+        return metrics
 
     def _forward_micro_batch(
         self, micro_batch, temperature, calculate_entropy=False
@@ -410,6 +467,12 @@ class DataParallelPPOActor(BasePPOActor):
             "old_log_probs",
             "advantages",
         ]
+        if "scaf_hint_source_mask" in data.batch.keys():
+            select_keys.append("scaf_hint_source_mask")
+        if "luffy_expert_mask" in data.batch.keys():
+            select_keys.append("luffy_expert_mask")
+        if self.config.use_off_policy_loss and self.config.use_off_policy_probs:
+            select_keys.append("target_probs")
         if self.config.use_kl_loss:
             select_keys.append("ref_log_prob")
         # Include pre-computed IS weights if present in batch
@@ -461,10 +524,11 @@ class DataParallelPPOActor(BasePPOActor):
 
                     calculate_entropy = self.config.calculate_entropy or (entropy_coeff != 0)
 
-                    if self.config.use_dynamic_bsz:
-                        loss_scale_factor = response_mask.shape[0] / self.config.ppo_mini_batch_size
-                    else:
-                        loss_scale_factor = 1 / self.gradient_accumulation
+                    loss_scale_factor = _compute_micro_batch_loss_scale(
+                        self.config,
+                        micro_batch_size=response_mask.shape[0],
+                        gradient_accumulation=self.gradient_accumulation,
+                    )
 
                     # all return: (bsz, response_length)
                     entropy, log_prob = self._forward_micro_batch(
@@ -487,20 +551,70 @@ class DataParallelPPOActor(BasePPOActor):
                     # Weights are computed centrally in trainer and added when algorithm.rollout_is=True
                     rollout_is_weights = model_inputs.get("rollout_is_weights", None)
 
-                    # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
-                    # clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_clip_cov
-                    policy_loss_fn = get_policy_loss_fn(loss_mode)
-
-                    # Compute policy loss (any function is expected to return 2 values)
-                    pg_loss, pg_metrics = policy_loss_fn(
-                        old_log_prob=old_log_prob,
-                        log_prob=log_prob,
-                        advantages=advantages,
-                        response_mask=response_mask,
-                        loss_agg_mode=loss_agg_mode,
-                        config=self.config,
-                        rollout_is_weights=rollout_is_weights,
-                    )
+                    luffy_loss_output = None
+                    if self.config.use_off_policy_loss:
+                        if self.config.off_policy_loss_impl != "token":
+                            raise ValueError("LUFFY migration currently supports off_policy_loss_impl=token")
+                        if "luffy_expert_mask" not in model_inputs:
+                            raise ValueError("LUFFY policy loss requires luffy_expert_mask in the training batch")
+                        luffy_loss_output = compute_token_on_off_policy_loss(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            eos_mask=response_mask,
+                            cliprange=self.config.clip_ratio,
+                            clip_upper_bound=self.config.clip_upper_bound,
+                            prefix_mask=model_inputs["luffy_expert_mask"],
+                            off_cliprange=self.config.off_policy_cliprange,
+                            off_normalize=self.config.off_policy_normalize,
+                            off_max_clip=(
+                                self.config.off_policy_max_clip if self.config.off_policy_max_clip != -1 else None
+                            ),
+                            off_min_clip=(
+                                self.config.off_policy_min_clip if self.config.off_policy_min_clip != -1 else None
+                            ),
+                            all_max_clip=self.config.all_max_clip if self.config.all_max_clip != -1 else None,
+                            off_policy_reshape=self.config.off_policy_reshape,
+                            off_policy_reshape_weight=self.config.off_policy_reshape_weight,
+                            off_policy_reshape_pow_exp=self.config.off_policy_reshape_pow_exp,
+                            on_policy_reshape=self.config.on_policy_reshape,
+                            on_policy_reshape_weight=self.config.on_policy_reshape_weight,
+                            on_policy_reshape_pow_exp=self.config.on_policy_reshape_pow_exp,
+                            target_probs=model_inputs.get("target_probs"),
+                            loss_remove_token_mean=self.config.loss_remove_token_mean,
+                            loss_remove_clip=self.config.loss_remove_clip,
+                        )
+                        pg_loss = luffy_loss_output["pg_loss"]
+                        pg_metrics = {
+                            "actor/pg_clipfrac": luffy_loss_output["on_pg_clipfrac"].detach().item(),
+                            "actor/ppo_kl": luffy_loss_output["ppo_kl"].detach().item(),
+                            "actor/pg_clipfrac_lower": 0.0,
+                            "actor/off_pg_loss": luffy_loss_output["off_pg_loss"].detach().item(),
+                            "actor/on_pg_loss": luffy_loss_output["on_pg_loss"].detach().item(),
+                            "actor/off_pg_clipfrac": luffy_loss_output["off_pg_clipfrac"].detach().item(),
+                            "actor/off_policy_prob": luffy_loss_output["off_policy_prob"].detach().item(),
+                            "actor/on_policy_prob": luffy_loss_output["on_policy_prob"].detach().item(),
+                            "actor/off_ratio_mean": luffy_loss_output["off_ratio_mean"].detach().item(),
+                            "actor/off_ratio_max_clip_frac": luffy_loss_output["off_ratio_max_clip_frac"]
+                            .detach()
+                            .item(),
+                            "actor/off_ratio_min_clip_frac": luffy_loss_output["off_ratio_min_clip_frac"]
+                            .detach()
+                            .item(),
+                        }
+                    else:
+                        # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
+                        # clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_clip_cov
+                        policy_loss_fn = get_policy_loss_fn(loss_mode)
+                        pg_loss, pg_metrics = policy_loss_fn(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                            loss_agg_mode=loss_agg_mode,
+                            config=self.config,
+                            rollout_is_weights=rollout_is_weights,
+                        )
                     micro_batch_metrics.update(pg_metrics)
 
                     # Skip if using bypass_mode loss (metrics already computed in pg_metrics)
@@ -518,11 +632,38 @@ class DataParallelPPOActor(BasePPOActor):
                         micro_batch_metrics.update(rollout_corr_metrics)
 
                     policy_loss = pg_loss
+                    if (
+                        "scaf_hint_source_mask" in model_inputs
+                        and loss_mode == "vanilla"
+                        and not self.config.use_off_policy_loss
+                    ):
+                        micro_batch_metrics.update(
+                            self._compute_scaf_source_grad_norms(
+                                old_log_prob=old_log_prob,
+                                log_prob=log_prob,
+                                advantages=advantages,
+                                response_mask=response_mask,
+                                hint_source_mask=model_inputs["scaf_hint_source_mask"],
+                                loss_scale_factor=loss_scale_factor,
+                                rollout_is_weights=rollout_is_weights,
+                            )
+                        )
                     if calculate_entropy and entropy is not None:
-                        entropy_agg = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)
+                        if self.config.use_off_policy_loss:
+                            entropy_agg = verl_F.masked_mean(entropy, response_mask)
+                        else:
+                            entropy_agg = agg_loss(
+                                loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode
+                            )
                         micro_batch_metrics["actor/entropy"] = entropy_agg.detach().item()
                         if entropy_coeff != 0:
                             policy_loss -= entropy_agg * entropy_coeff
+
+                    if self.config.use_off_policy_loss and self.config.use_ppo_kl_loss:
+                        assert luffy_loss_output is not None
+                        absolute_ppo_kl = luffy_loss_output["ppo_kl"].abs()
+                        policy_loss += absolute_ppo_kl * self.config.ppo_kl_loss_coef
+                        micro_batch_metrics["actor/ppo_kl_loss"] = absolute_ppo_kl.detach().item()
 
                     if self.config.use_kl_loss:
                         ref_log_prob = model_inputs["ref_log_prob"]

@@ -38,7 +38,8 @@ def mock_test_fn():
 class TestRegisterAdvEst(unittest.TestCase):
     def setUp(self):
         """Clear the registry before each test"""
-        verl.trainer.ppo.core_algos.ADV_ESTIMATOR_REGISTRY.clear()
+        self._original_registry = verl.trainer.ppo.core_algos.ADV_ESTIMATOR_REGISTRY
+        self._original_registry_contents = self._original_registry.copy()
         verl.trainer.ppo.core_algos.ADV_ESTIMATOR_REGISTRY = {
             "gae": lambda x: x * 2,
             "vtrace": lambda x: x + 1,
@@ -47,6 +48,9 @@ class TestRegisterAdvEst(unittest.TestCase):
 
     def tearDown(self) -> None:
         verl.trainer.ppo.core_algos.ADV_ESTIMATOR_REGISTRY.clear()
+        verl.trainer.ppo.core_algos.ADV_ESTIMATOR_REGISTRY = self._original_registry
+        self._original_registry.clear()
+        self._original_registry.update(self._original_registry_contents)
         return super().tearDown()
 
     def test_register_new_function(self):

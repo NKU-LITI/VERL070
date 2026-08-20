@@ -149,6 +149,33 @@ trainer:
   # Directory for logging validation data; no dump if null
   validation_data_dir: null
 
+  # Enable Scaf-GRPO regeneration for rollout groups whose rewards are all zero.
+  with_hint: false
+
+  # Keep the original prompt when injecting a successful hinted response.
+  replace_hint_prompt: false
+
+  # Number of initial optimizer steps before enabling scaffolded regeneration.
+  warmup_steps: 0
+
+  # Maximum number of trajectories replaced in each rescued rollout group.
+  replace_num: 1
+
+  # Number of hierarchical hint stages: knowledge, planning, and solution.
+  scaf_hint_stages: 3
+
+  # Directory for Scaf-GRPO hinted generations; no dump if null.
+  hint_data_dir: null
+
+  # Inject one expert trajectory after hint failure, or after pass@k=0 when hints are disabled.
+  with_luffy_expert: false
+
+  # Replace one rollout in every group with an expert trajectory and bypass hint generation.
+  luffy_expert_every_group: false
+
+  # Dataset column containing the complete expert response.
+  luffy_expert_key: qwen_expert_trajectory
+
   # Number of nodes used in the training
   nnodes: 1
 

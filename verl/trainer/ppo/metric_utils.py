@@ -17,6 +17,7 @@ Metrics related to the PPO trainer.
 
 from collections import defaultdict
 from functools import partial
+from math import comb
 from typing import Any, Callable
 
 import numpy as np
@@ -379,6 +380,20 @@ def calc_maj_val(data: list[dict[str, Any]], vote_key: str, val_key: str) -> flo
     return maj_val
 
 
+def estimate_pass_at_k(vals: list[Any], k: int) -> float:
+    """Compute the unbiased pass@k estimate for binary-style rewards."""
+    n = len(vals)
+    if n == 0:
+        return 0.0
+    k = min(k, n)
+    correct = sum(float(value) > 0 for value in vals)
+    if correct == 0:
+        return 0.0
+    if n - correct < k:
+        return 1.0
+    return 1.0 - comb(n - correct, k) / comb(n, k)
+
+
 def process_validation_metrics(
     data_sources: list[str], sample_uids: list[str], infos_dict: dict[str, list[Any]], seed: int = 42
 ) -> dict[str, dict[str, dict[str, float]]]:
@@ -454,6 +469,8 @@ def process_validation_metrics(
                     ns.append(n_resps)
 
                     for n in ns:
+                        if var_name in {"reward", "score", "acc"}:
+                            metric[f"pass@{n}/mean"] = estimate_pass_at_k(var_vals, n)
                         [(bon_mean, bon_std), (won_mean, won_std)] = bootstrap_metric(
                             data=var_vals, subset_size=n, reduce_fns=[np.max, np.min], seed=seed
                         )

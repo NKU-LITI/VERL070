@@ -64,7 +64,7 @@ class PolicyLossConfig(BaseConfig):
     The inheritance from BaseConfig provides omegaconf.DictConfig-like interface for a dataclass config.
 
     Args:
-        loss_mode (str): Loss function mode. Options: 'vanilla', 'clip-cov', 'kl-cov', 'gpg'.
+        loss_mode (str): Loss function mode. Options include 'vanilla', 'clip-cov', 'kl-cov', and 'gpg'.
         clip_cov_ratio (float): Ratio of tokens to be clipped for clip-cov loss.
         clip_cov_lb (float): Lower bound for clip-cov loss.
         clip_cov_ub (float): Upper bound for clip-cov loss.
@@ -138,6 +138,26 @@ class ActorConfig(BaseConfig):
     clip_ratio: float = 0.2
     clip_ratio_low: float = 0.2
     clip_ratio_high: float = 0.2
+    clip_upper_bound: float = 1.0
+    use_off_policy_loss: bool = False
+    off_policy_loss_impl: str = "token"
+    off_policy_cliprange: float = 0.2
+    off_policy_normalize: bool = False
+    use_off_policy_probs: bool = False
+    use_off_policy_clip: bool = False
+    off_policy_max_clip: float = -1.0
+    off_policy_min_clip: float = -1.0
+    off_policy_reshape: str = "no_reshape"
+    off_policy_reshape_weight: float = 0.1
+    off_policy_reshape_pow_exp: float = 0.5
+    on_policy_reshape: str = "no_reshape"
+    on_policy_reshape_weight: float = 0.1
+    on_policy_reshape_pow_exp: float = 0.5
+    all_max_clip: float = -1.0
+    loss_remove_token_mean: bool = False
+    loss_remove_clip: bool = False
+    use_ppo_kl_loss: bool = False
+    ppo_kl_loss_coef: float = 0.01
     freeze_vision_tower: bool = False
     policy_loss: PolicyLossConfig = field(default_factory=PolicyLossConfig)
     clip_ratio_c: float = 3.0

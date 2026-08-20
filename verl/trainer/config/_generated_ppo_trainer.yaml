@@ -55,6 +55,26 @@ actor_rollout_ref:
     clip_ratio: 0.2
     clip_ratio_low: 0.2
     clip_ratio_high: 0.2
+    clip_upper_bound: 1.0
+    use_off_policy_loss: false
+    off_policy_loss_impl: token
+    off_policy_cliprange: 0.2
+    off_policy_normalize: false
+    use_off_policy_probs: false
+    use_off_policy_clip: false
+    off_policy_max_clip: -1
+    off_policy_min_clip: -1
+    off_policy_reshape: no_reshape
+    off_policy_reshape_weight: 0.1
+    off_policy_reshape_pow_exp: 0.5
+    on_policy_reshape: no_reshape
+    on_policy_reshape_weight: 0.1
+    on_policy_reshape_pow_exp: 0.5
+    all_max_clip: -1
+    loss_remove_token_mean: false
+    loss_remove_clip: false
+    use_ppo_kl_loss: false
+    ppo_kl_loss_coef: 0.01
     tau_pos: 1.0
     tau_neg: 1.05
     freeze_vision_tower: false
@@ -579,6 +599,15 @@ trainer:
   log_val_generations: 0
   rollout_data_dir: null
   validation_data_dir: null
+  with_hint: false
+  replace_hint_prompt: false
+  warmup_steps: 0
+  replace_num: 1
+  scaf_hint_stages: 3
+  hint_data_dir: null
+  with_luffy_expert: false
+  luffy_expert_every_group: false
+  luffy_expert_key: qwen_expert_trajectory
   nnodes: 1
   n_gpus_per_node: 8
   save_freq: -1

@@ -27,6 +27,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
+    estimate_pass_at_k,
     process_validation_metrics,
 )
 from verl.utils.metric import (
@@ -318,6 +319,13 @@ class TestProcessValidationMetrics(unittest.TestCase):
 
         # For bootstrap with n=2, the majority vote could be either A or B
         # depending on the random sampling, so we don't check the exact value
+
+
+class TestPassAtK(unittest.TestCase):
+    def test_unbiased_pass_at_k(self):
+        self.assertEqual(estimate_pass_at_k([0, 0, 0], 2), 0.0)
+        self.assertEqual(estimate_pass_at_k([1, 0, 0], 3), 1.0)
+        self.assertAlmostEqual(estimate_pass_at_k([1, 0, 0, 0], 2), 0.5)
 
 
 if __name__ == "__main__":
