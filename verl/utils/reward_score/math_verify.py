@@ -39,6 +39,7 @@
 
 
 import re
+import unicodedata
 
 try:
     from math_verify import parse, verify
@@ -48,6 +49,16 @@ except ImportError:
 
 
 _EXPENSIVE_POWER_RE = re.compile(r"[\)\]][\s]*(?:\*\*|\^)[\s]*\{?\d{2,}\}?")
+
+
+def _normalize_unicode_digits(text: str) -> str:
+    normalized = []
+    for char in text:
+        try:
+            normalized.append(str(unicodedata.decimal(char)))
+        except (TypeError, ValueError):
+            normalized.append(char)
+    return "".join(normalized)
 
 
 def _has_expensive_power(answer: Basic) -> bool:
@@ -74,6 +85,9 @@ def _is_verifiable_answer(answer) -> bool:
 # [ADD] [REWARD] 为了和Luffy的0.6.0以及reward_impl_version=4对齐
 def compute_score(model_output: str, ground_truth: str, timeout_score: float = 0) -> bool:
     try:
+        model_output = _normalize_unicode_digits(model_output)
+        ground_truth = _normalize_unicode_digits(ground_truth)
+
         parsed_answers = parse(model_output)
         predicted_answers = [answer for answer in parsed_answers if _is_verifiable_answer(answer)]
         if not predicted_answers:

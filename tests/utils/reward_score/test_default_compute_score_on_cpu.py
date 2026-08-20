@@ -71,3 +71,16 @@ def test_math_verify_rejects_large_compound_power_without_verifying():
 
     assert result is False
     verify.assert_not_called()
+
+
+def test_math_verify_normalizes_unicode_digits_before_parsing():
+    with (
+        patch.object(math_verify, "parse", side_effect=[["111"], ["111"]]) as parse,
+        patch.object(math_verify, "verify", return_value=True) as verify,
+    ):
+        result = math_verify.compute_score("The answer is \\boxed{๑๑๑}.", "๑๑๑")
+
+    assert result is True
+    assert parse.call_args_list[0].args == ("The answer is \\boxed{111}.",)
+    assert parse.call_args_list[1].args == ("$111$",)
+    verify.assert_called_once_with(["111"], ["111"], timeout_seconds=1)

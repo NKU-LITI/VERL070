@@ -47,6 +47,7 @@ from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
     compute_throughout_metrics,
     compute_timing_metrics,
+    estimate_pass_at_k,
     process_validation_metrics,
 )
 from verl.trainer.ppo.reward import compute_reward, compute_reward_async
@@ -658,6 +659,7 @@ class RayPPOTrainer:
         sample_scores = []
         sample_turns = []
         sample_uids = []
+        sample_response_tokens = []
 
         for test_data in self.val_dataloader:
             test_batch = DataProto.from_single_dict(test_data)
@@ -730,6 +732,10 @@ class RayPPOTrainer:
             scores = reward_tensor.sum(-1).cpu().tolist()
             sample_scores.extend(scores)
 
+            prompt_len = test_batch.batch["prompts"].shape[-1]
+            response_tokens = test_batch.batch["attention_mask"][:, prompt_len:].sum(-1).cpu().tolist()
+            sample_response_tokens.extend(response_tokens)
+
             reward_extra_infos_dict["reward"].extend(scores)
             reward_extra_info = result.get("reward_extra_info", {})
             for key, values in reward_extra_info.items():
@@ -773,20 +779,45 @@ class RayPPOTrainer:
 
         data_src2var2metric2val = process_validation_metrics(data_sources, sample_uids, reward_extra_infos_dict)
         metric_dict = {}
+        data_source_reward = defaultdict(list)
+        for data_source, reward in zip(data_sources.tolist(), sample_scores, strict=True):
+            data_source_reward[data_source].append(reward)
+        for data_source, rewards in data_source_reward.items():
+            metric_dict[f"val/test_score/{data_source}"] = np.mean(rewards)
+
+        def add_luffy_val_core_metrics(prefix_parts, keep_indices):
+            uid2scores = defaultdict(list)
+            uid2response_tokens = defaultdict(list)
+            for idx in keep_indices:
+                uid = str(sample_uids[idx])
+                uid2scores[uid].append(sample_scores[idx])
+                uid2response_tokens[uid].append(sample_response_tokens[idx])
+
+            if not uid2scores:
+                return
+
+            n_max = max(len(values) for values in uid2scores.values())
+            metric_prefix = "/".join(["val-core", *prefix_parts])
+            metric_dict[f"{metric_prefix}/acc/mean@{n_max}"] = np.mean(
+                [np.mean(values) for values in uid2scores.values()]
+            )
+            metric_dict[f"{metric_prefix}/acc/pass@{n_max}/mean"] = np.mean(
+                [estimate_pass_at_k(values, n_max) for values in uid2scores.values()]
+            )
+            metric_dict[f"{metric_prefix}/response_tokens/mean@{n_max}"] = np.mean(
+                [np.mean(values) for values in uid2response_tokens.values()]
+            )
+
+        add_luffy_val_core_metrics(["total", "all"], list(range(len(sample_scores))))
+        difficulty_buckets = reward_extra_infos_dict.get("difficulty_bucket", [])
+        for difficulty_bucket in ("easy", "medium", "hard"):
+            keep_indices = [idx for idx, value in enumerate(difficulty_buckets) if value == difficulty_bucket]
+            add_luffy_val_core_metrics(["difficulty", difficulty_bucket], keep_indices)
+
         for data_source, var2metric2val in data_src2var2metric2val.items():
-            core_var = "acc" if "acc" in var2metric2val else "reward"
             for var_name, metric2val in var2metric2val.items():
-                n_max = max([int(name.split("@")[-1].split("/")[0]) for name in metric2val.keys()])
                 for metric_name, metric_val in metric2val.items():
-                    if (
-                        (var_name == core_var)
-                        and any(metric_name.startswith(pfx) for pfx in ["mean", "maj", "best", "pass"])
-                        and (f"@{n_max}" in metric_name)
-                    ):
-                        metric_sec = "val-core"
-                    else:
-                        metric_sec = "val-aux"
-                    pfx = f"{metric_sec}/{data_source}/{var_name}/{metric_name}"
+                    pfx = f"val-aux/{data_source}/{var_name}/{metric_name}"
                     metric_dict[pfx] = metric_val
 
         if len(sample_turns) > 0:
@@ -796,6 +827,14 @@ class RayPPOTrainer:
             metric_dict["val-aux/num_turns/mean"] = sample_turns.mean()
 
         return metric_dict
+
+    @staticmethod
+    def _add_avg_score(val_metrics: dict):
+        if "avg_score" in val_metrics:
+            return
+        test_scores = [val for key, val in val_metrics.items() if key.startswith("val/test_score/")]
+        if test_scores:
+            val_metrics["avg_score"] = np.mean(test_scores)
 
     def init_workers(self):
         """Initialize distributed training workers using Ray backend.
@@ -1582,6 +1621,7 @@ class RayPPOTrainer:
         if self.val_reward_fn is not None and self.config.trainer.get("val_before_train", True):
             val_metrics = self._validate()
             assert val_metrics, f"{val_metrics=}"
+            self._add_avg_score(val_metrics)
             pprint(f"Initial validation metrics: {val_metrics}")
             logger.log(data=val_metrics, step=self.global_steps)
             if self.config.trainer.get("val_only", False):
@@ -1853,6 +1893,7 @@ class RayPPOTrainer:
                 ):
                     with marked_timer("testing", timing_raw, color="green"):
                         val_metrics: dict = self._validate()
+                        self._add_avg_score(val_metrics)
                         if is_last_step:
                             last_val_metrics = val_metrics
                     metrics.update(val_metrics)
