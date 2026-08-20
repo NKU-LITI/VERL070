@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+# =============== math-verify 0.9.0 in verl 0.7.0 =================
 # try:
 #     from math_verify.errors import TimeoutException
 #     from math_verify.metric import math_metric
@@ -20,14 +20,12 @@
 # except ImportError:
 #     print("To use Math-Verify, please install it first by running `pip install math-verify`.")
 
-
 # def compute_score(model_output: str, ground_truth: str, timeout_score: float = 0) -> bool:
 #     verify_func = math_metric(
 #         gold_extraction_target=(LatexExtractionConfig(),),
 #         pred_extraction_target=(ExprExtractionConfig(), LatexExtractionConfig()),
 #     )
 #     ret_score = 0.0
-
 #     # Wrap the ground truth in \boxed{} format for verification
 #     ground_truth_boxed = "\\boxed{" + ground_truth + "}"
 #     try:
@@ -36,32 +34,48 @@
 #         pass
 #     except TimeoutException:
 #         ret_score = timeout_score
-
 #     return ret_score
+# =============== math-verify 0.9.0 in verl 0.7.0 =================
 
+
+import re
 
 try:
     from math_verify import parse, verify
-    from sympy import Basic, Integral, Limit, Product, Sum
+    from sympy import Basic, Integral, Limit, Pow, Product, Sum
 except ImportError:
     print("To use Math-Verify, please install it first by running `pip install math-verify`.")
 
 
-def _has_unevaluated_operation(answer) -> bool:
+_EXPENSIVE_POWER_RE = re.compile(r"[\)\]][\s]*(?:\*\*|\^)[\s]*\{?\d{2,}\}?")
+
+
+def _has_expensive_power(answer: Basic) -> bool:
+    for power in answer.atoms(Pow):
+        exponent = power.exp
+        if exponent.is_integer and exponent.is_number and abs(int(exponent)) >= 64 and not power.base.is_Atom:
+            return True
+    return False
+
+
+def _is_verifiable_answer(answer) -> bool:
     """Return whether an extracted answer can trigger expensive SymPy evaluation.
 
     Training prompts require a simplified final answer.  An unevaluated sum,
-    product, integral, or limit is therefore not a valid final answer, and
-    passing one to math-verify can make SymPy spend the full comparison timeout
-    trying to evaluate it.
+    product, integral, limit, or large compound-base power is therefore not a
+    valid final answer, and passing one to math-verify can make SymPy spend the
+    full comparison timeout trying to evaluate it.
     """
-    return isinstance(answer, Basic) and answer.has(Sum, Product, Integral, Limit)
+    if isinstance(answer, str):
+        return _EXPENSIVE_POWER_RE.search(answer) is None
+    return isinstance(answer, Basic) and not answer.has(Sum, Product, Integral, Limit) and not _has_expensive_power(answer)
 
 
 # [ADD] [REWARD] 为了和Luffy的0.6.0以及reward_impl_version=4对齐
 def compute_score(model_output: str, ground_truth: str, timeout_score: float = 0) -> bool:
     try:
-        predicted_answers = [answer for answer in parse(model_output) if not _has_unevaluated_operation(answer)]
+        parsed_answers = parse(model_output)
+        predicted_answers = [answer for answer in parsed_answers if _is_verifiable_answer(answer)]
         if not predicted_answers:
             return bool(timeout_score)
 

@@ -1,6 +1,6 @@
 from unittest.mock import patch
 
-from sympy import Sum, oo, symbols
+from sympy import I, Sum, oo, symbols
 
 from verl.utils.reward_score import default_compute_score
 from verl.utils.reward_score import math_verify
@@ -58,3 +58,16 @@ def test_math_verify_keeps_safe_extractions_when_filtering_unevaluated_sum():
 
     assert result is True
     verify.assert_called_once_with(["gold"], ["prediction"], timeout_seconds=1)
+
+
+def test_math_verify_rejects_large_compound_power_without_verifying():
+    unsafe_answer = -((1 - I) ** 2016) + (1 + I) ** 2016
+
+    with (
+        patch.object(math_verify, "parse", return_value=[unsafe_answer, "-(1 - I)^{2016} + (1 + I)^{2016}"]),
+        patch.object(math_verify, "verify") as verify,
+    ):
+        result = math_verify.compute_score("An unsimplified high power", "14")
+
+    assert result is False
+    verify.assert_not_called()
