@@ -63,7 +63,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=true \
     reward_manager.name=naive \
     reward_model.reward_manager=remote \
-    reward_model.num_workers=1 \
+    reward_model.num_workers=8 \
     reward_model.launch_reward_fn_async=false \
     trainer.with_hint=true \
     trainer.with_luffy_expert=true \

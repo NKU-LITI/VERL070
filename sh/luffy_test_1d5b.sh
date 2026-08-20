@@ -124,7 +124,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.optim.weight_decay=${wd} \
     reward_manager.name=naive \
     reward_model.reward_manager=remote \
-    reward_model.num_workers=1 \
+    reward_model.num_workers=8 \
     trainer.nnodes=${nnodes} \
     trainer.n_gpus_per_node=${n_gpus_per_node} \
     trainer.total_epochs=${epoch} \

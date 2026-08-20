@@ -38,62 +38,29 @@
 # =============== math-verify 0.9.0 in verl 0.7.0 =================
 
 
-import re
-import unicodedata
+import logging
+import os
 
 try:
     from math_verify import parse, verify
-    from sympy import Basic, Integral, Limit, Pow, Product, Sum
 except ImportError:
     print("To use Math-Verify, please install it first by running `pip install math-verify`.")
 
 
-_EXPENSIVE_POWER_RE = re.compile(r"[\)\]][\s]*(?:\*\*|\^)[\s]*\{?\d{2,}\}?")
+def _configure_math_verify_logging() -> None:
+    """Use the same default logging policy as the local LUFFY-source runner."""
+    log_level = os.getenv("LUFFY_MATH_VERIFY_LOG_LEVEL", "CRITICAL").upper()
+    level = getattr(logging, log_level, logging.CRITICAL)
+    logging.getLogger("math_verify").setLevel(level)
+    logging.getLogger("math_verify.grader").setLevel(level)
 
 
-def _normalize_unicode_digits(text: str) -> str:
-    normalized = []
-    for char in text:
-        try:
-            normalized.append(str(unicodedata.decimal(char)))
-        except (TypeError, ValueError):
-            normalized.append(char)
-    return "".join(normalized)
-
-
-def _has_expensive_power(answer: Basic) -> bool:
-    for power in answer.atoms(Pow):
-        exponent = power.exp
-        if exponent.is_integer and exponent.is_number and abs(int(exponent)) >= 64 and not power.base.is_Atom:
-            return True
-    return False
-
-
-def _is_verifiable_answer(answer) -> bool:
-    """Return whether an extracted answer can trigger expensive SymPy evaluation.
-
-    Training prompts require a simplified final answer.  An unevaluated sum,
-    product, integral, limit, or large compound-base power is therefore not a
-    valid final answer, and passing one to math-verify can make SymPy spend the
-    full comparison timeout trying to evaluate it.
-    """
-    if isinstance(answer, str):
-        return _EXPENSIVE_POWER_RE.search(answer) is None
-    return isinstance(answer, Basic) and not answer.has(Sum, Product, Integral, Limit) and not _has_expensive_power(answer)
-
-
-# [ADD] [REWARD] 为了和Luffy的0.6.0以及reward_impl_version=4对齐
+# Match LUFFY-source reward_impl_version=4 exactly: parse the full response,
+# parse the dollar-delimited reference answer, then let math-verify compare all
+# extracted candidates with its own timeout and fallback behavior.
 def compute_score(model_output: str, ground_truth: str, timeout_score: float = 0) -> bool:
-    try:
-        model_output = _normalize_unicode_digits(model_output)
-        ground_truth = _normalize_unicode_digits(ground_truth)
-
-        parsed_answers = parse(model_output)
-        predicted_answers = [answer for answer in parsed_answers if _is_verifiable_answer(answer)]
-        if not predicted_answers:
-            return bool(timeout_score)
-
-        golden_answers = parse("$" + ground_truth + "$")
-        return bool(verify(golden_answers, predicted_answers, timeout_seconds=1))
-    except Exception:
-        return bool(timeout_score)
+    del timeout_score  # Kept only for compatibility with the verl reward API.
+    _configure_math_verify_logging()
+    predicted_answers = parse(model_output)
+    golden_answers = parse("$" + ground_truth + "$")
+    return bool(verify(golden_answers, predicted_answers))

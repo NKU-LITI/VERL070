@@ -22,5 +22,6 @@ packaging>=20.0
 uvicorn
 fastapi
 latex2sympy2_extended
-math_verify
+math-verify==0.6.0
+sympy==1.13.3
 tensorboard
