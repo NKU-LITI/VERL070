@@ -114,28 +114,23 @@ def test_build_hinted_gen_batch_rejects_missing_dataset_fields():
         build_hinted_gen_batch(batch)
 
 
-def test_scaf_source_grad_norms_separate_rollout_and_hint_tokens():
+def test_scaf_source_grad_norms_separate_rollout_hint_and_expert_tokens():
     actor = object.__new__(DataParallelPPOActor)
-    actor.config = _ActorConfig(
-        clip_ratio=0.2,
-        clip_ratio_low=None,
-        clip_ratio_high=None,
-        loss_agg_mode="token-mean",
-        global_batch_info={},
-    )
-    log_prob = torch.tensor([[0.01, 0.02], [0.03, 0.04]], requires_grad=True)
+    log_prob = torch.tensor([[0.01, 0.02], [0.03, 0.04], [0.05, 0.06]], requires_grad=True)
+    policy_loss = -(log_prob * torch.tensor([[1.0], [2.0], [3.0]])).mean()
 
     metrics = actor._compute_scaf_source_grad_norms(
-        old_log_prob=torch.zeros_like(log_prob),
+        policy_loss=policy_loss,
         log_prob=log_prob,
-        advantages=torch.ones_like(log_prob),
         response_mask=torch.ones_like(log_prob),
-        hint_source_mask=torch.tensor([[0, 0], [1, 1]]),
         loss_scale_factor=1.0,
+        hint_source_mask=torch.tensor([[0, 0], [1, 1], [1, 1]]),
+        expert_source_mask=torch.tensor([[0, 0], [0, 0], [1, 1]]),
     )
 
     assert metrics["actor/source_grad_norm/rollout"] > 0
     assert metrics["actor/source_grad_norm/hint"] > 0
+    assert metrics["actor/source_grad_norm/expert"] > metrics["actor/source_grad_norm/hint"]
 
 
 def test_log_rollout_data_includes_difficulty_bucket(tmp_path):

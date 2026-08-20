@@ -107,46 +107,36 @@ class DataParallelPPOActor(BasePPOActor):
 
     def _compute_scaf_source_grad_norms(
         self,
-        old_log_prob: torch.Tensor,
+        policy_loss: torch.Tensor,
         log_prob: torch.Tensor,
-        advantages: torch.Tensor,
         response_mask: torch.Tensor,
-        hint_source_mask: torch.Tensor,
         loss_scale_factor: float,
-        rollout_is_weights: torch.Tensor | None = None,
+        hint_source_mask: torch.Tensor | None = None,
+        expert_source_mask: torch.Tensor | None = None,
     ) -> dict[str, float]:
-        """Report rollout/hint policy-signal norms without changing the optimized loss."""
-        negative_approx_kl = torch.clamp(log_prob - old_log_prob, min=-20.0, max=20.0)
-        ratio = torch.exp(negative_approx_kl)
-        clip_ratio = self.config.clip_ratio
-        clip_ratio_low = self.config.clip_ratio_low if self.config.clip_ratio_low is not None else clip_ratio
-        clip_ratio_high = self.config.clip_ratio_high if self.config.clip_ratio_high is not None else clip_ratio
-        clip_ratio_c = self.config.get("clip_ratio_c", 3.0)
-
-        pg_losses1 = -advantages * ratio
-        pg_losses2 = -advantages * torch.clamp(ratio, 1 - clip_ratio_low, 1 + clip_ratio_high)
-        clipped_losses = torch.maximum(pg_losses1, pg_losses2)
-        pg_losses = torch.where(
-            advantages < 0,
-            torch.minimum(-advantages * clip_ratio_c, clipped_losses),
-            clipped_losses,
-        )
-        if rollout_is_weights is not None:
-            pg_losses = pg_losses * rollout_is_weights
-
+        """Report rollout/hint/expert policy-signal norms without changing the optimized loss."""
         response_mask = response_mask.bool()
-        hint_mask = hint_source_mask.bool() & response_mask
-        source_masks = {"rollout": response_mask & ~hint_mask, "hint": hint_mask}
+        hint_mask = (
+            torch.zeros_like(response_mask)
+            if hint_source_mask is None
+            else hint_source_mask.bool() & response_mask
+        )
+        expert_mask = (
+            torch.zeros_like(response_mask)
+            if expert_source_mask is None
+            else expert_source_mask.bool() & response_mask
+        )
+        hint_mask = hint_mask & ~expert_mask
+        source_masks = {
+            "rollout": response_mask & ~hint_mask & ~expert_mask,
+            "hint": hint_mask,
+            "expert": expert_mask,
+        }
+        policy_grad = torch.autograd.grad(policy_loss * loss_scale_factor, log_prob, retain_graph=True)[0]
         metrics = {}
         for source, source_mask in source_masks.items():
-            source_loss = agg_loss(
-                loss_mat=pg_losses * source_mask.to(pg_losses.dtype),
-                loss_mask=response_mask,
-                loss_agg_mode=self.config.loss_agg_mode,
-                **self.config.global_batch_info,
-            )
-            grad = torch.autograd.grad(source_loss * loss_scale_factor, log_prob, retain_graph=True)[0]
-            grad_sq_sum = grad.detach().float().square().sum()
+            source_grad = policy_grad * source_mask.to(policy_grad.dtype)
+            grad_sq_sum = source_grad.detach().float().square().sum()
             if torch.distributed.is_available() and torch.distributed.is_initialized():
                 torch.distributed.all_reduce(grad_sq_sum, op=torch.distributed.ReduceOp.SUM)
             metrics[f"actor/source_grad_norm/{source}"] = torch.sqrt(grad_sq_sum).item()
@@ -637,20 +627,15 @@ class DataParallelPPOActor(BasePPOActor):
                         micro_batch_metrics.update(rollout_corr_metrics)
 
                     policy_loss = pg_loss
-                    if (
-                        "scaf_hint_source_mask" in model_inputs
-                        and loss_mode == "vanilla"
-                        and not self.config.use_off_policy_loss
-                    ):
+                    if "scaf_hint_source_mask" in model_inputs or "luffy_expert_mask" in model_inputs:
                         micro_batch_metrics.update(
                             self._compute_scaf_source_grad_norms(
-                                old_log_prob=old_log_prob,
+                                policy_loss=pg_loss,
                                 log_prob=log_prob,
-                                advantages=advantages,
                                 response_mask=response_mask,
-                                hint_source_mask=model_inputs["scaf_hint_source_mask"],
                                 loss_scale_factor=loss_scale_factor,
-                                rollout_is_weights=rollout_is_weights,
+                                hint_source_mask=model_inputs.get("scaf_hint_source_mask"),
+                                expert_source_mask=model_inputs.get("luffy_expert_mask"),
                             )
                         )
                     if calculate_entropy and entropy is not None:
