@@ -390,6 +390,6 @@ def test_luffy_dynamic_token_sum_loss_uses_declared_micro_batch_scaling():
         ppo_mini_batch_size=32,
     )
 
-    scale = _compute_micro_batch_loss_scale(config, micro_batch_size=6, gradient_accumulation=32)
+    scale = _compute_micro_batch_loss_scale(config, micro_batch_size=6)
 
     assert scale == pytest.approx(1 / 32)

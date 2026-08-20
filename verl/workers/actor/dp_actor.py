@@ -46,8 +46,12 @@ logger = logging.getLogger(__file__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
 
 
-def _compute_micro_batch_loss_scale(config, micro_batch_size: int, gradient_accumulation: int) -> float:
+def _compute_micro_batch_loss_scale(
+    config, micro_batch_size: int, gradient_accumulation: int | None = None
+) -> float:
     if not config.use_dynamic_bsz:
+        if gradient_accumulation is None:
+            raise ValueError("gradient_accumulation is required when dynamic batching is disabled")
         return 1 / gradient_accumulation
     if config.use_off_policy_loss and config.loss_remove_token_mean:
         # LUFFY's token-sum loss already sums over samples in a dynamic pack.
@@ -501,10 +505,11 @@ class DataParallelPPOActor(BasePPOActor):
         for _ in range(self.config.ppo_epochs):
             for batch_idx, mini_batch in enumerate(mini_batches):
                 if self.config.use_dynamic_bsz:
+                    gradient_accumulation = None
                     max_token_len = self.config.ppo_max_token_len_per_gpu * self.ulysses_sequence_parallel_size
                     micro_batches, _ = prepare_dynamic_batch(mini_batch, max_token_len=max_token_len)
                 else:
-                    self.gradient_accumulation = (
+                    gradient_accumulation = (
                         self.config.ppo_mini_batch_size // self.config.ppo_micro_batch_size_per_gpu
                     )
                     micro_batches = mini_batch.split(self.config.ppo_micro_batch_size_per_gpu)
@@ -527,7 +532,7 @@ class DataParallelPPOActor(BasePPOActor):
                     loss_scale_factor = _compute_micro_batch_loss_scale(
                         self.config,
                         micro_batch_size=response_mask.shape[0],
-                        gradient_accumulation=self.gradient_accumulation,
+                        gradient_accumulation=gradient_accumulation,
                     )
 
                     # all return: (bsz, response_length)
