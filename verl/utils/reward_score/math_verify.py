@@ -42,14 +42,30 @@
 
 try:
     from math_verify import parse, verify
+    from sympy import Basic, Integral, Limit, Product, Sum
 except ImportError:
     print("To use Math-Verify, please install it first by running `pip install math-verify`.")
+
+
+def _has_unevaluated_operation(answer) -> bool:
+    """Return whether an extracted answer can trigger expensive SymPy evaluation.
+
+    Training prompts require a simplified final answer.  An unevaluated sum,
+    product, integral, or limit is therefore not a valid final answer, and
+    passing one to math-verify can make SymPy spend the full comparison timeout
+    trying to evaluate it.
+    """
+    return isinstance(answer, Basic) and answer.has(Sum, Product, Integral, Limit)
+
 
 # [ADD] [REWARD] 为了和Luffy的0.6.0以及reward_impl_version=4对齐
 def compute_score(model_output: str, ground_truth: str, timeout_score: float = 0) -> bool:
     try:
-        predicted_answers = parse(model_output)
+        predicted_answers = [answer for answer in parse(model_output) if not _has_unevaluated_operation(answer)]
+        if not predicted_answers:
+            return bool(timeout_score)
+
         golden_answers = parse("$" + ground_truth + "$")
-        return bool(verify(golden_answers, predicted_answers))
+        return bool(verify(golden_answers, predicted_answers, timeout_seconds=1))
     except Exception:
         return bool(timeout_score)

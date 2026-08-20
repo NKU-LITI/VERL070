@@ -596,6 +596,8 @@ trainer:
   logger:
   - console
   - wandb
+  - tensorboard
+  tracking_dir: null
   log_val_generations: 0
   rollout_data_dir: null
   validation_data_dir: null

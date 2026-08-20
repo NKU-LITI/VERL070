@@ -143,6 +143,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.default_local_dir="${EXP_NAME}/checkpoints" \
     trainer.hint_data_dir="${EXP_NAME}/rollout_log/hint" \
     trainer.warmup_steps=$warmup_steps \
-    trainer.logger=['console','wandb'] \
+    trainer.logger=['console','wandb','tensorboard'] \
+    trainer.tracking_dir="${EXP_NAME}" \
     trainer.project_name=$PROJECT_NAME \
     trainer.experiment_name=$EXP_NAME $@

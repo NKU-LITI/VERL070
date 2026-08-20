@@ -666,6 +666,8 @@ trainer:
   logger:
   - console
   - wandb
+  - tensorboard
+  tracking_dir: null
   log_val_generations: 0
   nnodes: 1
   n_gpus_per_node: 8

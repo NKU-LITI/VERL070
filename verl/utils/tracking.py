@@ -24,6 +24,20 @@ from pathlib import Path
 from typing import Any
 
 
+def _resolve_tracking_root(experiment_name: str, config=None) -> Path:
+    """Return the shared local directory for an experiment's tracking backends."""
+    trainer_config = config.get("trainer", {}) if config is not None else {}
+    configured_root = os.environ.get("VERL_TRACKING_DIR") or trainer_config.get("tracking_dir")
+    repo_root = Path(__file__).resolve().parents[2]
+    if configured_root:
+        tracking_root = Path(os.path.expanduser(str(configured_root)))
+        if not tracking_root.is_absolute():
+            tracking_root = repo_root / tracking_root
+    else:
+        tracking_root = repo_root / "outputs" / Path(str(experiment_name)).name
+    return tracking_root.resolve()
+
+
 class Tracking:
     """A unified tracking interface for logging experiment data to multiple backends.
 
@@ -59,6 +73,8 @@ class Tracking:
                 assert backend in self.supported_backend, f"{backend} is not supported"
 
         self.logger = {}
+        self.tracking_root = _resolve_tracking_root(experiment_name, config)
+        self.tracking_root.mkdir(parents=True, exist_ok=True)
 
         if "tracking" in default_backend or "wandb" in default_backend:
             import os
@@ -69,7 +85,16 @@ class Tracking:
             if config and config["trainer"].get("wandb_proxy", None):
                 settings = wandb.Settings(https_proxy=config["trainer"]["wandb_proxy"])
             entity = os.environ.get("WANDB_ENTITY", None)
-            wandb.init(project=project_name, name=experiment_name, entity=entity, config=config, settings=settings)
+            wandb_dir = Path(os.path.expanduser(os.environ.get("WANDB_DIR", str(self.tracking_root)))).resolve()
+            wandb_dir.mkdir(parents=True, exist_ok=True)
+            wandb.init(
+                project=project_name,
+                name=experiment_name,
+                entity=entity,
+                config=config,
+                settings=settings,
+                dir=str(wandb_dir),
+            )
             self.logger["wandb"] = wandb
 
         if "trackio" in default_backend:
@@ -143,7 +168,10 @@ class Tracking:
             self.logger["vemlp_wandb"] = vemlp_wandb
 
         if "tensorboard" in default_backend:
-            self.logger["tensorboard"] = _TensorboardAdapter(project_name, experiment_name)
+            os.environ.setdefault("TENSORBOARD_DIR", str(self.tracking_root / "tensorboard"))
+            self.logger["tensorboard"] = _TensorboardAdapter(
+                project_name, experiment_name, tracking_root=self.tracking_root
+            )
 
         if "console" in default_backend:
             from verl.utils.logger import LocalLogger
@@ -254,15 +282,20 @@ class FileLogger:
 
 
 class _TensorboardAdapter:
-    def __init__(self, project_name, experiment_name):
+    def __init__(self, project_name, experiment_name, tracking_root: Path | None = None):
         import os
 
         from torch.utils.tensorboard import SummaryWriter
 
-        tensorboard_dir = os.environ.get("TENSORBOARD_DIR", f"tensorboard_log/{project_name}/{experiment_name}")
+        default_dir = (
+            tracking_root / "tensorboard"
+            if tracking_root is not None
+            else Path(f"tensorboard_log/{project_name}/{experiment_name}")
+        )
+        tensorboard_dir = Path(os.path.expanduser(os.environ.get("TENSORBOARD_DIR", str(default_dir)))).resolve()
         os.makedirs(tensorboard_dir, exist_ok=True)
         print(f"Saving tensorboard log to {tensorboard_dir}.")
-        self.writer = SummaryWriter(tensorboard_dir)
+        self.writer = SummaryWriter(str(tensorboard_dir))
 
     def log(self, data, step):
         for key in data:

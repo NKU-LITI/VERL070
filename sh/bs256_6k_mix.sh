@@ -100,5 +100,3 @@ python3 -m hint_mix_grpo.main_ppo \
     trainer.logger=['console','wandb'] \
     trainer.project_name=$PROJECT_NAME \
     trainer.experiment_name=$EXP_NAME $@
-
-    

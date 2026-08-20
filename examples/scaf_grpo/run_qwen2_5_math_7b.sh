@@ -79,7 +79,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.default_local_dir="${OUTPUT_DIR}/checkpoints" \
     trainer.project_name=scaf_grpo \
     trainer.experiment_name=qwen2_5_math_7b \
-    trainer.logger='["console","wandb"]' \
+    trainer.logger='["console","wandb","tensorboard"]' \
+    trainer.tracking_dir="${OUTPUT_DIR}" \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \
     trainer.save_freq=10 \
