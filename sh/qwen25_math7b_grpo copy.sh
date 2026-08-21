@@ -8,7 +8,7 @@ set -euo pipefail
 source /home/liting/miniconda3/etc/profile.d/conda.sh
 conda activate verl070
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-4,5}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-5,6}"
 export TOKENIZERS_PARALLELISM=false
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE="${WANDB_MODE:-online}"
@@ -49,7 +49,11 @@ n_rollout=8
 train_temp=1.0
 train_batchsize=64 # 256
 ppo_mini_batchsize=32 # 64
-micro_batchsize_per_gpu=1
+
+ppo_micro_batch_size_per_gpu=1
+log_prob_micro_batch_size_per_gpu=2
+log_prob_micro_batch_size_per_gpu=2
+
 warmup_steps=5 # 50
 
 ### val
@@ -57,7 +61,7 @@ val_batchsize=64 # 512
 # luffy实际上是一个批次全处理，val_batch_size=null
 
 ###
-save_freq=10
+save_freq=20
 test_freq=5 # 10
 
 
@@ -79,16 +83,19 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
+    \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batchsize} \
-    actor_rollout_ref.actor.use_dynamic_bsz=True \
+    actor_rollout_ref.actor.use_dynamic_bsz=False \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${micro_batchsize_per_gpu} \
-    actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
-    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${ppo_micro_batch_size_per_gpu} \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${log_prob_micro_batch_size_per_gpu} \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${log_prob_micro_batch_size_per_gpu} \
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=8192 \
-    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=False \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=8192 \
+    \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
@@ -121,8 +128,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=${save_freq} \
     trainer.max_actor_ckpt_to_keep=2 \
     trainer.test_freq=${test_freq} \
-    \
     trainer.val_before_train=True \
+    \
     trainer.with_hint=False \
     trainer.with_luffy_expert=False \
     trainer.luffy_expert_every_group=False \

@@ -39,7 +39,7 @@ data_val_path="${DATA_VAL_PATH:-${data_dir}/val_200.success_rate_k8.right.parque
 # ------------------------------------------------------------------------
 ### train
 nnodes=1
-n_gpus_per_node=2 # 8 
+n_gpus_per_node=2 # 8
 tensor_model_parallel_size=2 # 2
 vllm_gpu_memory_util=0.35 # 0.8
 epoch=10 # 100
@@ -49,7 +49,11 @@ n_rollout=8
 train_temp=1.0
 train_batchsize=64 # 256
 ppo_mini_batchsize=32 # 64
-micro_batchsize_per_gpu=1
+
+ppo_micro_batch_size_per_gpu=1
+log_prob_micro_batch_size_per_gpu=2
+log_prob_micro_batch_size_per_gpu=2
+
 warmup_steps=5 # 50
 
 ### val
@@ -79,16 +83,19 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
+    \
     actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batchsize} \
-    actor_rollout_ref.actor.use_dynamic_bsz=True \
+    actor_rollout_ref.actor.use_dynamic_bsz=False \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=8192 \
-    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${micro_batchsize_per_gpu} \
-    actor_rollout_ref.actor.ulysses_sequence_parallel_size=1 \
-    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=True \
+    actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=${ppo_micro_batch_size_per_gpu} \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=${log_prob_micro_batch_size_per_gpu} \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=${log_prob_micro_batch_size_per_gpu} \
+    actor_rollout_ref.rollout.log_prob_use_dynamic_bsz=False \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=8192 \
-    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=True \
+    actor_rollout_ref.ref.log_prob_use_dynamic_bsz=False \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=8192 \
+    \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
@@ -124,8 +131,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=${save_freq} \
     trainer.max_actor_ckpt_to_keep=2 \
     trainer.test_freq=${test_freq} \
-    \
     trainer.val_before_train=True \
+    \
     trainer.with_hint=False \
     trainer.with_luffy_expert=True \
     trainer.luffy_expert_every_group=True \
