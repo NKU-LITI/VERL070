@@ -8,14 +8,14 @@ set -euo pipefail
 source /home/liting/miniconda3/etc/profile.d/conda.sh
 conda activate verl070
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-4,5}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-5,6}"
 export TOKENIZERS_PARALLELISM=false
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE="${WANDB_MODE:-online}"
 export VLLM_USE_V1=1
 
-PROJECT_NAME="scaf-grpo-expert-sft" 
-EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_verl_070_expert_test}"
+PROJECT_NAME="scaf-grpo-expert-sft"
+EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_luffy}"
 MODEL_PATH="${MODEL_PATH:-/workplace/nankai/liting_space/LLM/Qwen2.5-Math-7B}"
 DATA_SEED="${DATA_SEED:-42}"
 
@@ -99,10 +99,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.actor.use_kl_loss=False \
     actor_rollout_ref.actor.kl_loss_coef=0.0 \
     actor_rollout_ref.actor.kl_loss_type=low_var_kl \
-    actor_rollout_ref.actor.use_off_policy_loss=True \
-    actor_rollout_ref.actor.off_policy_loss_impl=token \
-    actor_rollout_ref.actor.off_policy_normalize=False \
-    actor_rollout_ref.actor.off_policy_reshape=p_div_p_0.1 \
+    actor_rollout_ref.actor.use_off_policy_loss=False \
     actor_rollout_ref.actor.loss_remove_token_mean=True \
     actor_rollout_ref.actor.loss_remove_clip=True \
     algorithm.use_kl_in_reward=False \

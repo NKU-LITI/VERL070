@@ -63,6 +63,7 @@ from verl.utils import tensordict_utils as tu
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path, should_save_ckpt_esi
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.debug import marked_timer
+from verl.utils.debugpy_utils import maybe_wait_for_debugger
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.metric import reduce_metrics
 from verl.utils.py_functional import rename_dict
@@ -380,8 +381,8 @@ class RayPPOTrainer:
             raise ValueError("trainer.replace_num must be positive")
         if self.luffy_expert_every_group and not self.with_luffy_expert:
             raise ValueError("trainer.luffy_expert_every_group requires trainer.with_luffy_expert=True")
-        if self.with_luffy_expert and not config.actor_rollout_ref.actor.use_off_policy_loss:
-            raise ValueError("LUFFY expert injection requires actor.use_off_policy_loss=True")
+        # if self.with_luffy_expert and not config.actor_rollout_ref.actor.use_off_policy_loss:
+            # raise ValueError("LUFFY expert injection requires actor.use_off_policy_loss=True")
         if self.with_luffy_expert and config.actor_rollout_ref.actor.off_policy_loss_impl != "token":
             raise ValueError("LUFFY expert injection requires actor.off_policy_loss_impl=token")
         if self.with_luffy_expert and self.use_legacy_worker_impl == "disable":
@@ -499,6 +500,40 @@ class RayPPOTrainer:
 
         print(f"Dumped generations to {filename}")
 
+    @staticmethod
+    def _to_list(values, n: int, default=None):
+        if values is None:
+            return [default] * n
+        if isinstance(values, np.ndarray):
+            return values.tolist()
+        if hasattr(values, "tolist"):
+            return values.tolist()
+        return list(values)
+
+    @staticmethod
+    def _add_val_core_metrics(metric_dict, prefix_parts, sample_uids, scores, response_tokens, keep_indices):
+        uid2scores = defaultdict(list)
+        uid2response_tokens = defaultdict(list)
+        for idx in keep_indices:
+            uid = str(sample_uids[idx])
+            uid2scores[uid].append(scores[idx])
+            uid2response_tokens[uid].append(response_tokens[idx])
+
+        if not uid2scores:
+            return
+
+        n_max = max(len(values) for values in uid2scores.values())
+        metric_prefix = "/".join(["val-core", *prefix_parts])
+        metric_dict[f"{metric_prefix}/acc/mean@{n_max}"] = np.mean(
+            [np.mean(values) for values in uid2scores.values()]
+        )
+        metric_dict[f"{metric_prefix}/acc/pass@{n_max}/mean"] = np.mean(
+            [estimate_pass_at_k(values, n_max) for values in uid2scores.values()]
+        )
+        metric_dict[f"{metric_prefix}/response_tokens/mean@{n_max}"] = np.mean(
+            [np.mean(values) for values in uid2response_tokens.values()]
+        )
+
     def _log_rollout_data(
         self, batch: DataProto, reward_extra_infos_dict: dict, timing_raw: dict, rollout_data_dir: str
     ):
@@ -518,14 +553,13 @@ class RayPPOTrainer:
             reward_extra_infos_to_dump = reward_extra_infos_dict.copy()
             for metadata_key in ("difficulty_bucket", "trajectory_source"):
                 if metadata_key in batch.non_tensor_batch:
-                    values = batch.non_tensor_batch[metadata_key]
-                    reward_extra_infos_to_dump[metadata_key] = (
-                        values.tolist() if isinstance(values, np.ndarray) else list(values)
+                    reward_extra_infos_to_dump[metadata_key] = self._to_list(
+                        batch.non_tensor_batch[metadata_key], len(inputs), ""
                     )
             if "request_id" in batch.non_tensor_batch:
                 reward_extra_infos_to_dump.setdefault(
                     "request_id",
-                    batch.non_tensor_batch["request_id"].tolist(),
+                    self._to_list(batch.non_tensor_batch["request_id"], len(inputs), ""),
                 )
 
             self._dump_generations(
@@ -628,7 +662,10 @@ class RayPPOTrainer:
             return reward_tensor, reward_extra_infos_dict
 
     def _get_gen_batch(self, batch: DataProto) -> DataProto:
-        reward_model_keys = set({"data_source", "reward_model", "extra_info", "uid"}) & batch.non_tensor_batch.keys()
+        reward_model_keys = (
+            set({"data_source", "reward_model", "extra_info", "uid", "difficulty_bucket"})
+            & batch.non_tensor_batch.keys()
+        )
         if self.with_luffy_expert and self.luffy_expert_key in batch.non_tensor_batch:
             # Expert responses are injected after rollout generation, so keep this
             # dataset column on the training batch that is repeated and scored.
@@ -647,6 +684,19 @@ class RayPPOTrainer:
             gen_batch.non_tensor_batch.update(batch.non_tensor_batch)
 
         return gen_batch
+
+    @staticmethod
+    def _extract_difficulty_buckets(batch: DataProto, n: int) -> list[str]:
+        if "difficulty_bucket" in batch.non_tensor_batch:
+            values = batch.non_tensor_batch["difficulty_bucket"]
+        elif "extra_info" in batch.non_tensor_batch:
+            values = [
+                extra_info.get("difficulty_bucket", "unknown") if isinstance(extra_info, dict) else "unknown"
+                for extra_info in batch.non_tensor_batch["extra_info"]
+            ]
+        else:
+            values = None
+        return [str(value).strip().lower() for value in RayPPOTrainer._to_list(values, n, "unknown")]
 
     def _validate(self):
         data_source_lst = []
@@ -739,6 +789,8 @@ class RayPPOTrainer:
             reward_extra_infos_dict["reward"].extend(scores)
             reward_extra_info = result.get("reward_extra_info", {})
             for key, values in reward_extra_info.items():
+                if key == "difficulty_bucket":
+                    continue
                 if key not in reward_extra_infos_dict:
                     reward_extra_infos_dict[key] = []
                 if isinstance(values, np.ndarray):
@@ -746,11 +798,9 @@ class RayPPOTrainer:
                 else:
                     reward_extra_infos_dict[key].extend(values if isinstance(values, list) else [values])
 
-            if "difficulty_bucket" in test_batch.non_tensor_batch:
-                difficulties = test_batch.non_tensor_batch["difficulty_bucket"]
-                reward_extra_infos_dict["difficulty_bucket"].extend(
-                    difficulties.tolist() if isinstance(difficulties, np.ndarray) else list(difficulties)
-                )
+            reward_extra_infos_dict["difficulty_bucket"].extend(
+                self._extract_difficulty_buckets(test_batch, reward_tensor.shape[0])
+            )
 
             # collect num_turns of each prompt
             if "__num_turns__" in test_batch.non_tensor_batch:
@@ -785,34 +835,25 @@ class RayPPOTrainer:
         for data_source, rewards in data_source_reward.items():
             metric_dict[f"val/test_score/{data_source}"] = np.mean(rewards)
 
-        def add_luffy_val_core_metrics(prefix_parts, keep_indices):
-            uid2scores = defaultdict(list)
-            uid2response_tokens = defaultdict(list)
-            for idx in keep_indices:
-                uid = str(sample_uids[idx])
-                uid2scores[uid].append(sample_scores[idx])
-                uid2response_tokens[uid].append(sample_response_tokens[idx])
-
-            if not uid2scores:
-                return
-
-            n_max = max(len(values) for values in uid2scores.values())
-            metric_prefix = "/".join(["val-core", *prefix_parts])
-            metric_dict[f"{metric_prefix}/acc/mean@{n_max}"] = np.mean(
-                [np.mean(values) for values in uid2scores.values()]
-            )
-            metric_dict[f"{metric_prefix}/acc/pass@{n_max}/mean"] = np.mean(
-                [estimate_pass_at_k(values, n_max) for values in uid2scores.values()]
-            )
-            metric_dict[f"{metric_prefix}/response_tokens/mean@{n_max}"] = np.mean(
-                [np.mean(values) for values in uid2response_tokens.values()]
-            )
-
-        add_luffy_val_core_metrics(["total", "all"], list(range(len(sample_scores))))
+        self._add_val_core_metrics(
+            metric_dict=metric_dict,
+            prefix_parts=["total", "all"],
+            sample_uids=sample_uids,
+            scores=sample_scores,
+            response_tokens=sample_response_tokens,
+            keep_indices=list(range(len(sample_scores))),
+        )
         difficulty_buckets = reward_extra_infos_dict.get("difficulty_bucket", [])
         for difficulty_bucket in ("easy", "medium", "hard"):
             keep_indices = [idx for idx, value in enumerate(difficulty_buckets) if value == difficulty_bucket]
-            add_luffy_val_core_metrics(["difficulty", difficulty_bucket], keep_indices)
+            self._add_val_core_metrics(
+                metric_dict=metric_dict,
+                prefix_parts=["difficulty", difficulty_bucket],
+                sample_uids=sample_uids,
+                scores=sample_scores,
+                response_tokens=sample_response_tokens,
+                keep_indices=keep_indices,
+            )
 
         for data_source, var2metric2val in data_src2var2metric2val.items():
             for var_name, metric2val in var2metric2val.items():
@@ -1602,6 +1643,8 @@ class RayPPOTrainer:
 
         from verl.utils.tracking import Tracking
 
+        maybe_wait_for_debugger("VERL_DEBUG_FIT", 5678, "RayPPOTrainer.fit", aliases=("SRFT_DEBUG_FIT",))
+
         logger = Tracking(
             project_name=self.config.trainer.project_name,
             experiment_name=self.config.trainer.experiment_name,
@@ -1649,6 +1692,12 @@ class RayPPOTrainer:
 
         for epoch in range(current_epoch, self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
+                maybe_wait_for_debugger(
+                    "VERL_DEBUG_TRAIN_STEP",
+                    5679,
+                    "RayPPOTrainer.fit train step",
+                    aliases=("SRFT_DEBUG_TRAIN_STEP",),
+                )
                 if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
                 metrics = {}

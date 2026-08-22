@@ -15,7 +15,7 @@ export WANDB_MODE="${WANDB_MODE:-online}"
 export VLLM_USE_V1=1
 
 PROJECT_NAME="scaf-grpo-expert-sft"
-EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_grpo}"
+EXP_NAME="${EXP_NAME:-outputs/qwen25_math7b_test_on_1cuda}"
 MODEL_PATH="${MODEL_PATH:-/workplace/nankai/liting_space/LLM/Qwen2.5-Math-7B}"
 DATA_SEED="${DATA_SEED:-42}"
 
@@ -40,7 +40,7 @@ data_val_path="${DATA_VAL_PATH:-${data_dir}/val_200.success_rate_k8.right.parque
 ### train
 nnodes=1
 n_gpus_per_node=1 # 8
-tensor_model_parallel_size=2 # 2
+tensor_model_parallel_size=1 # 2
 vllm_gpu_memory_util=0.35 # 0.8
 epoch=10 # 100
 lr=1e-6

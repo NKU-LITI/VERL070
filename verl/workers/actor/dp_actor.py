@@ -29,6 +29,7 @@ import verl.utils.torch_functional as verl_F
 from verl import DataProto
 from verl.trainer.ppo.core_algos import agg_loss, compute_token_on_off_policy_loss, get_policy_loss_fn, kl_penalty
 from verl.utils.attention_utils import index_first_axis, pad_input, rearrange, unpad_input
+from verl.utils.debugpy_utils import maybe_wait_for_debugger
 from verl.utils.device import get_device_id, get_device_name
 from verl.utils.fsdp_utils import FSDPModule, fsdp2_clip_grad_norm_
 from verl.utils.profiler import GPUMemoryLogger
@@ -140,7 +141,9 @@ class DataParallelPPOActor(BasePPOActor):
             grad_sq_sum = source_grad.detach().float().square().sum()
             if torch.distributed.is_available() and torch.distributed.is_initialized():
                 torch.distributed.all_reduce(grad_sq_sum, op=torch.distributed.ReduceOp.SUM)
-            metrics[f"actor/source_grad_norm/{source}"] = torch.sqrt(grad_sq_sum).item()
+            grad_norm = torch.sqrt(grad_sq_sum).item()
+            metrics[f"actor/source_grad_norm/{source}"] = grad_norm
+            # metrics[f"actor/grad_norm/{source}"] = grad_norm
         return metrics
 
     def _forward_micro_batch(
@@ -511,6 +514,12 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batch = micro_batch.to(get_device_id())
                     micro_batch_metrics = {}
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
+                    maybe_wait_for_debugger(
+                        "VERL_DEBUG_LOSS",
+                        5681,
+                        "DataParallelPPOActor.update_policy loss",
+                        aliases=("SRFT_DEBUG_LOSS",),
+                    )
                     response_mask = model_inputs["response_mask"]
                     old_log_prob = model_inputs["old_log_probs"]
                     advantages = model_inputs["advantages"]

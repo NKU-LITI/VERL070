@@ -28,6 +28,7 @@ from verl.trainer.ppo.ray_trainer import RayPPOTrainer
 from verl.trainer.ppo.reward import load_reward_manager
 from verl.trainer.ppo.utils import need_critic, need_reference_policy
 from verl.utils.config import validate_config
+from verl.utils.debugpy_utils import maybe_wait_for_debugger
 from verl.utils.device import auto_set_device, is_cuda_available
 from verl.utils.import_utils import load_extern_object
 
@@ -271,6 +272,7 @@ class TaskRunner:
         from verl.utils.fs import copy_to_local
 
         print(f"TaskRunner hostname: {socket.gethostname()}, PID: {os.getpid()}")
+        maybe_wait_for_debugger("VERL_DEBUG_TASK_RUNNER", 5678, "TaskRunner.run")
         pprint(OmegaConf.to_container(config, resolve=True))
         OmegaConf.resolve(config)
 

@@ -7,7 +7,7 @@ set -euo pipefail
 
 source /home/liting/miniconda3/etc/profile.d/conda.sh
 
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-6}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-4}"
 export TOKENIZERS_PARALLELISM=false
 export HYDRA_FULL_ERROR=1
 export WANDB_MODE="${WANDB_MODE:-online}"
