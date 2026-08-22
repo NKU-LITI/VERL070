@@ -35,6 +35,14 @@ PPO_RAY_RUNTIME_ENV = {
 }
 
 
+def _debug_env_vars() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key.startswith(("VERL_DEBUG_", "SRFT_DEBUG_"))
+    }
+
+
 def get_ppo_ray_runtime_env():
     """
     A filter function to return the PPO Ray runtime environment.
@@ -48,7 +56,9 @@ def get_ppo_ray_runtime_env():
         "env_vars": PPO_RAY_RUNTIME_ENV["env_vars"].copy(),
         **({"working_dir": None} if working_dir is None else {}),
     }
+    runtime_env["env_vars"].update(_debug_env_vars())
     for key in list(runtime_env["env_vars"].keys()):
         if os.environ.get(key) is not None:
-            runtime_env["env_vars"].pop(key, None)
+            if not key.startswith(("VERL_DEBUG_", "SRFT_DEBUG_")):
+                runtime_env["env_vars"].pop(key, None)
     return runtime_env

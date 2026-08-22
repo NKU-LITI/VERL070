@@ -1692,12 +1692,6 @@ class RayPPOTrainer:
 
         for epoch in range(current_epoch, self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
-                maybe_wait_for_debugger(
-                    "VERL_DEBUG_TRAIN_STEP",
-                    5679,
-                    "RayPPOTrainer.fit train step",
-                    aliases=("SRFT_DEBUG_TRAIN_STEP",),
-                )
                 if hasattr(self.actor_rollout_wg, "async_calls_finalize_fn_exec"):
                     self.actor_rollout_wg.async_calls_finalize_fn_exec(blocking=False)
                 metrics = {}

@@ -514,12 +514,6 @@ class DataParallelPPOActor(BasePPOActor):
                     micro_batch = micro_batch.to(get_device_id())
                     micro_batch_metrics = {}
                     model_inputs = {**micro_batch.batch, **micro_batch.non_tensor_batch}
-                    maybe_wait_for_debugger(
-                        "VERL_DEBUG_LOSS",
-                        5681,
-                        "DataParallelPPOActor.update_policy loss",
-                        aliases=("SRFT_DEBUG_LOSS",),
-                    )
                     response_mask = model_inputs["response_mask"]
                     old_log_prob = model_inputs["old_log_probs"]
                     advantages = model_inputs["advantages"]
@@ -562,6 +556,12 @@ class DataParallelPPOActor(BasePPOActor):
                             raise ValueError("LUFFY migration currently supports off_policy_loss_impl=token")
                         if "luffy_expert_mask" not in model_inputs:
                             raise ValueError("LUFFY policy loss requires luffy_expert_mask in the training batch")
+                        maybe_wait_for_debugger(
+                            "VERL_DEBUG_LOSS",
+                            5681,
+                            "DataParallelPPOActor.update_policy compute_token_on_off_policy_loss",
+                            aliases=("SRFT_DEBUG_LOSS",),
+                        )
                         luffy_loss_output = compute_token_on_off_policy_loss(
                             old_log_prob=old_log_prob,
                             log_prob=log_prob,
@@ -611,6 +611,12 @@ class DataParallelPPOActor(BasePPOActor):
                         # gpg -> verl.trainer.ppo.core_algos.compute_policy_loss_gpg
                         # clip_cov -> verl.trainer.ppo.core_algos.compute_policy_loss_clip_cov
                         policy_loss_fn = get_policy_loss_fn(loss_mode)
+                        maybe_wait_for_debugger(
+                            "VERL_DEBUG_LOSS",
+                            5681,
+                            f"DataParallelPPOActor.update_policy policy_loss_fn={policy_loss_fn.__name__}",
+                            aliases=("SRFT_DEBUG_LOSS",),
+                        )
                         pg_loss, pg_metrics = policy_loss_fn(
                             old_log_prob=old_log_prob,
                             log_prob=log_prob,

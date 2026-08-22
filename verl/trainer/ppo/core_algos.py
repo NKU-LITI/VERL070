@@ -31,6 +31,7 @@ from omegaconf import DictConfig
 import verl.utils.torch_functional as verl_F
 from verl.trainer.config import AlgoConfig
 from verl.utils import as_torch_index, group_mean_std
+from verl.utils.debugpy_utils import maybe_wait_for_debugger
 from verl.utils.import_utils import deprecated
 from verl.workers.config import ActorConfig
 
@@ -799,7 +800,7 @@ def agg_loss(
         loss: `a scalar torch.Tensor`
             aggregated loss
     """
-    if loss_agg_mode == "token-mean":
+    if loss_agg_mode == "token-mean": # [LOC] PPO 默认
         if batch_num_tokens is None:
             batch_num_tokens = loss_mask.sum()
         loss = verl_F.masked_sum(loss_mat, loss_mask) / batch_num_tokens * dp_size
@@ -903,6 +904,7 @@ def compute_policy_loss(
     return pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower
 
 
+# [LOC] [GRPO]
 @register_policy_loss("vanilla")  # type: ignore[arg-type]
 def compute_policy_loss_vanilla(
     old_log_prob: torch.Tensor,
@@ -936,6 +938,12 @@ def compute_policy_loss_vanilla(
             log probabilities of actions under the rollout policy, shape (batch_size, response_length).
     """
 
+    maybe_wait_for_debugger(
+        "VERL_DEBUG_LOSS",
+        5681,
+        "core_algos.compute_policy_loss_vanilla",
+        aliases=("SRFT_DEBUG_LOSS",),
+    )
     assert config is not None
     assert not isinstance(config, AlgoConfig)
     clip_ratio = config.clip_ratio  # Clipping parameter ε for standard PPO. See https://arxiv.org/abs/1707.06347.
@@ -1041,6 +1049,12 @@ def compute_token_on_off_policy_loss(
     ``off_cliprange``, ``off_normalize``, and ``off_abs_cliprange`` are kept
     for exact API parity with LUFFY; its released token loss does not use them.
     """
+    maybe_wait_for_debugger(
+        "VERL_DEBUG_LOSS",
+        5681,
+        "core_algos.compute_token_on_off_policy_loss",
+        aliases=("SRFT_DEBUG_LOSS",),
+    )
     del off_cliprange, off_normalize, off_abs_cliprange
 
     negative_approx_kl = log_prob - old_log_prob
@@ -1343,6 +1357,12 @@ def compute_policy_loss_gpg(
         pg_loss: `a scalar torch.Tensor`
             policy gradient loss computed via GPG
     """
+    maybe_wait_for_debugger(
+        "VERL_DEBUG_LOSS",
+        5681,
+        "core_algos.compute_policy_loss_gpg",
+        aliases=("SRFT_DEBUG_LOSS",),
+    )
     assert config is not None
     pg_losses = -log_prob * advantages
 
@@ -1397,6 +1417,12 @@ def compute_policy_loss_clip_cov(
         clip_cov_ub (float, optional):
             Upper bound for clipping covariance. Defaults to 5.0.
     """
+    maybe_wait_for_debugger(
+        "VERL_DEBUG_LOSS",
+        5681,
+        "core_algos.compute_policy_loss_clip_cov",
+        aliases=("SRFT_DEBUG_LOSS",),
+    )
     assert config is not None
     assert not isinstance(config, AlgoConfig), "passing AlgoConfig not supported yet"
     assert config.policy_loss is not None
@@ -1493,6 +1519,12 @@ def compute_policy_loss_kl_cov(
         ppo_kl_coef (float, optional):
             Coefficient for the KL penalty term in the loss. Defaults to 1.
     """
+    maybe_wait_for_debugger(
+        "VERL_DEBUG_LOSS",
+        5681,
+        "core_algos.compute_policy_loss_kl_cov",
+        aliases=("SRFT_DEBUG_LOSS",),
+    )
     assert config is not None
     assert not isinstance(config, AlgoConfig), "passing AlgoConfig not supported yet"
     assert config.policy_loss is not None
@@ -2029,6 +2061,12 @@ def compute_policy_loss_bypass_mode(
             loss: Scalar policy loss
             metrics: Dictionary with rollout correction metrics and actor/ppo_kl
     """
+    maybe_wait_for_debugger(
+        "VERL_DEBUG_LOSS",
+        5681,
+        "core_algos.compute_policy_loss_bypass_mode",
+        aliases=("SRFT_DEBUG_LOSS",),
+    )
     from verl.trainer.ppo.rollout_corr_helper import compute_rollout_correction_and_rejection_mask
 
     assert config is not None, "config is required for bypass_mode loss"

@@ -41,6 +41,13 @@ def maybe_wait_for_debugger(env_name: str, default_port: int, label: str, aliase
 
     key = "|".join(env_names)
     if key in _ATTACHED_KEYS:
+        try:
+            import debugpy
+        except ImportError:
+            print(f"[debugpy] {label}: debugpy is not installed; skip debugger breakpoint")
+            return
+        print(f"[debugpy] {label}: breaking in attached process, host={socket.gethostname()}, pid={os.getpid()}")
+        debugpy.breakpoint()
         return
     _ATTACHED_KEYS.add(key)
 
